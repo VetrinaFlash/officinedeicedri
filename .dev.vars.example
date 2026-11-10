@@ -1,0 +1,5 @@
+VAPID_PRIVATE_KEY=
+CRON_SECRET=
+APP_URL=http://localhost:8788
+# ADMIN_PASSWORD=  (facoltativo: sostituisce ADMIN_PASSWORD_HASH)
+# RESEND_API_KEY=

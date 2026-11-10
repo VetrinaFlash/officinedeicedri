@@ -1,0 +1,15 @@
+{
+  "name": "Gestionale · Officine dei Cedri",
+  "short_name": "Gestionale ODC",
+  "lang": "it",
+  "start_url": "/admin/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#1f3b2d",
+  "theme_color": "#1f3b2d",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

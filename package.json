@@ -1,0 +1,19 @@
+{
+  "name": "odc-gestionale",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "wrangler pages dev --port 8788",
+    "db:local": "echo Il database locale si crea da solo alla prima richiesta",
+    "deploy": "wrangler pages deploy",
+    "vapid": "node scripts/gen-vapid.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "wrangler": "^4.159.0"
+  },
+  "type": "module"
+}

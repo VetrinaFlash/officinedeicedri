@@ -1,0 +1,29 @@
+name = "odc-gestionale"
+pages_build_output_dir = "public"
+compatibility_date = "2025-09-01"
+
+# Database: crealo su Cloudflare (D1 → Create → nome "odc-gestionale") e incolla qui l'ID.
+# Tabelle e catalogo iniziale si creano da soli alla prima visita.
+[[d1_databases]]
+binding = "DB"
+database_name = "odc-gestionale"
+database_id = "INSERISCI_ID_DATABASE"
+
+# Foto prodotti: crea il bucket R2 "odc-gestionale-images".
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "odc-gestionale-images"
+
+[vars]
+APP_URL = "https://ordini.officinedeicedri.it"
+EMAIL_FROM = "Officine dei Cedri <ordini@officinedeicedri.it>"
+VAPID_SUBJECT = "mailto:info@officinedeicedri.it"
+VAPID_PUBLIC_KEY = "BHCqVD3k723W3VTxppfvRXo4LTeAppVFLtD2v8yZPBE8CKL3hcZbCtEO5ZkiUxowWsoVau3TRosiJXZ8gji1asY"
+# Impronta (PBKDF2) della password del pannello /admin/: la password in chiaro non è nel codice.
+# Per cambiarla: node scripts/hash-password.mjs "nuova password" e sostituisci il valore.
+ADMIN_PASSWORD_HASH = "pbkdf2$100000$tPDc6hb7V-2O9OJB3vU6zw$9KC2iJBq0IH1sZ-iauYpjnw9sRPh_E_v3ZAcbTqz134"
+
+# Secret da impostare su Cloudflare (Settings → Variables and Secrets), MAI qui:
+#   VAPID_PRIVATE_KEY   notifiche push
+#   RESEND_API_KEY      email (facoltativo)
+#   CRON_SECRET         promemoria automatici (facoltativo)
