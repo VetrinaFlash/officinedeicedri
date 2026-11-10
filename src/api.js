@@ -1,9 +1,9 @@
-import { json, HttpError, nowRome, fmtDateIt } from '../_lib/util.js';
-import { currentUser, getSettings, zoneFor, deliveryOptions, notifyUsers } from '../_lib/core.js';
-import { authRoutes } from '../_lib/routes-auth.js';
-import { clientRoutes } from '../_lib/routes-client.js';
-import { adminRoutes, AGENT_ROUTES } from '../_lib/routes-admin.js';
-import { ensureSchema } from '../_lib/migrate.js';
+import { json, HttpError, nowRome, fmtDateIt } from './lib/util.js';
+import { currentUser, getSettings, zoneFor, deliveryOptions, notifyUsers } from './lib/core.js';
+import { authRoutes } from './lib/routes-auth.js';
+import { clientRoutes } from './lib/routes-client.js';
+import { adminRoutes, AGENT_ROUTES } from './lib/routes-admin.js';
+import { ensureSchema } from './lib/migrate.js';
 
 function compile(routes, role) {
   return routes.map(([method, path, handler]) => {
@@ -13,13 +13,12 @@ function compile(routes, role) {
   });
 }
 
-const cronRoutes = [
-  // Promemoria "ordina entro il cut-off": chiamato ogni 30 minuti dal worker cron
-  ['POST', '/api/cron/reminders', async ({ env, request }) => {
-    if (!env.CRON_SECRET || request.headers.get('x-cron-secret') !== env.CRON_SECRET) return json({ error: 'forbidden' }, 403);
+/** Promemoria "ordina entro il limite": eseguito dal cron del Worker ogni 30 minuti. */
+export async function runReminders(env) {
+  await ensureSchema(env);
     const settings = await getSettings(env);
     const hours = Number(settings.reminder_hours || 0);
-    if (!hours || settings.orders_open === '0') return json({ sent: 0 });
+    if (!hours || settings.orders_open === '0') return 0;
     const { results: customers } = await env.DB.prepare(`
       SELECT DISTINCT c.* FROM customers c JOIN users u ON u.customer_id = c.id
       JOIN push_subscriptions s ON s.user_id = u.id
@@ -48,18 +47,17 @@ const cronRoutes = [
       });
       sent++;
     }
-    return json({ sent });
-  }],
-];
+    return sent;
+}
 
 const ROUTES = [
   ...compile(authRoutes, 'public'),
-  ...compile(cronRoutes, 'public'),
   ...compile(clientRoutes, 'cliente'),
   ...compile(adminRoutes, 'admin'),
 ];
 
-export async function onRequest(context) {
+/** Gestisce tutte le richieste /api/* (context: { request, env, waitUntil }). */
+export async function handleApi(context) {
   const { request, env } = context;
   const url = new URL(request.url);
 
@@ -76,7 +74,7 @@ export async function onRequest(context) {
   }
 
   // protezione CSRF: le richieste che modificano dati devono venire dalla stessa origine
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !url.pathname.startsWith('/api/cron/')) {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
     const origin = request.headers.get('origin');
     if (origin && origin !== url.origin) return json({ error: 'Origine non consentita.' }, 403);
   }
