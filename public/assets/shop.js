@@ -78,7 +78,7 @@ async function start() {
 function guard(view) {
   return async params => {
     if (!S.me) { go('/accedi'); return; }
-    if (S.me.role === 'admin') { location.href = '/admin/'; return; }
+    if (S.me.role !== 'cliente') { location.href = '/admin/'; return; }
     if (!S.boot) {
       try { await loadBoot(); } catch (e) { showError(e); return; }
     }
@@ -181,7 +181,7 @@ function authCard(inner) {
     </div></div>`);
 }
 function viewLogin() {
-  if (S.me) { location.href = S.me.role === 'admin' ? '/admin/' : '/#/'; return; }
+  if (S.me) { location.href = S.me.role === 'cliente' ? '/#/' : '/admin/'; return; }
   authCard(html`
     <h1>Area riservata</h1>
     <p class="lead">Ordina i prodotti con i tuoi prezzi e segui le consegne.</p>
@@ -195,7 +195,7 @@ function viewLogin() {
     e.preventDefault();
     withBusy(e.submitter, async () => {
       const r = await api('/api/auth/login', { method: 'POST', body: formData(e.target) });
-      if (r.role === 'admin') { location.href = '/admin/'; return; }
+      if (r.role !== 'cliente') { location.href = '/admin/'; return; }
       S.me = (await api('/api/auth/me')).user; S.boot = null;
       go('/');
     });
@@ -239,7 +239,7 @@ async function viewSetPassword({ token }) {
     e.preventDefault();
     withBusy(e.submitter, async () => {
       const r = await api('/api/auth/set-password', { method: 'POST', body: { token, password: e.target.password.value } });
-      if (r.role === 'admin') { location.href = '/admin/'; return; }
+      if (r.role !== 'cliente') { location.href = '/admin/'; return; }
       S.me = (await api('/api/auth/me')).user; S.boot = null;
       history.replaceState(null, '', '/#/');
       go('/');
@@ -248,6 +248,8 @@ async function viewSetPassword({ token }) {
 }
 // ---------- catalogo ----------
 function priceLine(p) {
+  if (p.promo) return html`${euro(p.price)} <span class="muted" style="font-weight:400">/ ${p.unit}</span>
+    <span class="list">invece di <s>${euro(p.regular_price)}</s></span><span class="offer">Offerta fino al ${dayShort(p.promo.ends_on)}</span>`;
   return html`${euro(p.price)} <span class="muted" style="font-weight:400">/ ${p.unit}</span>${p.price < p.list_price ? html`<span class="list">listino ${euro(p.list_price)}</span>` : ''}`;
 }
 function stepperHtml(p) {
@@ -261,10 +263,10 @@ function stepperHtml(p) {
 }
 function productRow(p) {
   const initial = p.name.replace(/[^A-Za-zÀ-ú]/g, '').charAt(0);
-  return html`<li class="prow ${p.available ? '' : 'off'}" data-row="${p.id}">
+  return html`<li class="prow ${p.available ? '' : 'off'} ${p.promo ? 'is-promo' : ''}" data-row="${p.id}">
     ${p.image ? html`<img class="thumb" src="${p.image}" alt="" loading="lazy">` : html`<div class="thumb" aria-hidden="true">${initial}</div>`}
     <div class="pinfo">
-      <div class="pname">${p.name}</div>
+      <div class="pname">${p.name}</div>${p.promo?.title ? html`<div class="pmeta" style="color:var(--leaf)">${p.promo.title}</div>` : ''}
       <div class="pmeta">${[p.pack, p.min_qty > 1 ? `min. ${qty(p.min_qty)}` : null, p.stock !== null && p.stock <= 10 && p.stock > 0 ? `ultimi ${qty(p.stock)}` : null].filter(Boolean).join(' · ')}</div>
       <div class="pprice num">${priceLine(p)}</div>
     </div>
@@ -279,7 +281,9 @@ function viewCatalog() {
   const b = S.boot;
   const view = $('#view');
   const opt = selectedDelivery();
-  const chips = [['all', 'Tutto'], ['fav', 'Preferiti'], ...(b.usual.length ? [['usual', 'I soliti']] : []), ...b.categories.map(c => [`c${c.id}`, c.name])];
+  const promoCount = b.products.filter(p => p.promo && p.available).length;
+  if (location.hash.includes('offerte') && promoCount) S.filter = 'promo';
+  const chips = [['all', 'Tutto'], ...(promoCount ? [['promo', `Offerte (${promoCount})`]] : []), ['fav', 'Preferiti'], ...(b.usual.length ? [['usual', 'I soliti']] : []), ...b.categories.map(c => [`c${c.id}`, c.name])];
   mount(view, html`
     ${b.announcements.map(a => html`<div class="notice ${a.kind}"><strong>${a.title}</strong>${a.body || ''}</div>`)}
     ${b.customer.blocked ? html`<div class="notice error"><strong>Ordini sospesi</strong>${b.customer.blocked_reason || `Contatta ${S.config.company_name} per riattivare gli ordini.`}</div>` : ''}
@@ -291,7 +295,7 @@ function viewCatalog() {
       : html`<div class="notice avviso"><strong>Nessuna data di consegna disponibile</strong>Contatta ${S.config.company_name} per concordare la consegna.</div>`}
     ${b.last_order_id && !cartLines().length ? html`<p><a class="btn small" href="#/ordini/${b.last_order_id}">Ripeti l'ultimo ordine</a></p>` : ''}
     <div class="searchbar">${icon('search')}<input type="search" id="q" placeholder="Cerca un prodotto" value="${S.q}" aria-label="Cerca un prodotto"></div>
-    <div class="chips" role="toolbar" aria-label="Filtra">${chips.map(([k, l]) => html`<button class="chip" data-filter="${k}" aria-pressed="${S.filter === k}">${l}</button>`)}</div>
+    <div class="chips" role="toolbar" aria-label="Filtra">${chips.map(([k, l]) => html`<button class="chip ${k === 'promo' ? 'promo-chip' : ''}" data-filter="${k}" aria-pressed="${S.filter === k}">${l}</button>`)}</div>
     <div id="plist"></div>`);
   renderProducts();
   $('#q').oninput = e => { S.q = e.target.value; renderProducts(); };
@@ -337,6 +341,7 @@ function renderProducts() {
   if (q) list = list.filter(p => `${p.name} ${p.pack || ''} ${p.sku || ''} ${p.description || ''}`.toLowerCase().includes(q));
   const holder = $('#plist');
   if (S.filter === 'fav') list = list.filter(p => p.favorite);
+  if (S.filter === 'promo') list = list.filter(p => p.promo);
   if (S.filter === 'usual') {
     const order = new Map(b.usual.map((u, i) => [u.product_id, i]));
     list = list.filter(p => order.has(p.id)).sort((a, z) => order.get(a.id) - order.get(z.id));
@@ -352,8 +357,10 @@ function renderProducts() {
     const groups = [...b.categories, { id: null, name: 'Altri prodotti' }]
       .map(c => ({ c, items: list.filter(p => (p.category_id ?? null) === c.id || (c.id === null && !b.categories.some(x => x.id === p.category_id))) }))
       .filter(g => g.items.length);
-    const featured = list.filter(p => p.featured && p.available);
+    const offers = list.filter(p => p.promo && p.available);
+    const featured = list.filter(p => p.featured && p.available && !p.promo);
     mount(holder, html`
+      ${offers.length ? html`<h2 class="cat-title">In offerta</h2><ul class="plist">${offers.map(productRow)}</ul>` : ''}
       ${featured.length ? html`<h2 class="cat-title">In evidenza</h2><ul class="plist">${featured.map(productRow)}</ul>` : ''}
       ${groups.map(g => html`<h2 class="cat-title">${g.c.name}</h2><ul class="plist">${g.items.map(productRow)}</ul>`)}`);
   } else {
@@ -395,7 +402,7 @@ function viewCart() {
     <h1>Il tuo ordine</h1>
     <section class="sheet">
       ${t.lines.map(({ p, q }) => html`<div class="cart-line">
-        <div><div class="pname">${p.name}</div><div class="pmeta">${[p.pack, `${euro(p.price)} / ${p.unit}`].filter(Boolean).join(' · ')}</div></div>
+        <div><div class="pname">${p.name}</div><div class="pmeta">${[p.pack, `${euro(p.price)} / ${p.unit}`].filter(Boolean).join(' · ')}</div>${p.promo ? html`<span class="offer">Offerta</span>` : ''}</div>
         <div data-stepper="${p.id}">${stepperHtml(p)}</div>
         <div class="muted small">${!p.available ? 'Non più disponibile: rimuovilo' : ''}</div>
         <div class="lt num">${euro(Math.round(p.price * q))}</div></div>`)}
@@ -499,7 +506,7 @@ async function viewOrder({ id }) {
     ${order.events.filter(e => e.note && e.status !== 'nuovo').length ? html`<section class="sheet"><h2>Aggiornamenti</h2><ul class="events">${order.events.filter(e => e.note && e.status !== 'nuovo').map(e => html`<li><time>${dateTime(e.created_at)}</time>${e.note}</li>`)}</ul></section>` : ''}
     <section class="sheet">
       <table class="items"><thead><tr><th>Prodotto</th><th class="num">Q.tà</th><th class="num">Totale</th></tr></thead>
-      <tbody>${order.items.map(i => html`<tr><td>${i.name}<div class="muted small">${[i.pack, `${euro(i.price)} / ${i.unit}`].filter(Boolean).join(' · ')}</div></td><td class="num">${qty(i.qty)}</td><td class="num">${euro(i.line_total)}</td></tr>`)}</tbody></table>
+      <tbody>${order.items.map(i => html`<tr><td>${i.name}${i.promo_id ? html` <span class="offer">Offerta</span>` : ''}<div class="muted small">${[i.pack, `${euro(i.price)} / ${i.unit}`].filter(Boolean).join(' · ')}</div></td><td class="num">${qty(i.qty)}</td><td class="num">${euro(i.line_total)}</td></tr>`)}</tbody></table>
       <table class="totals" style="margin-top:.75rem">
         <tr><td>Imponibile</td><td class="num">${euro(order.subtotal)}</td></tr>
         ${order.delivery_fee ? html`<tr><td>Consegna</td><td class="num">${euro(order.delivery_fee)}</td></tr>` : ''}
@@ -533,7 +540,7 @@ async function viewOrder({ id }) {
 // ---------- account ----------
 async function viewAccount() {
   const view = $('#view');
-  const [{ customer, users, supplier }, pst] = await Promise.all([
+  const [{ customer, users, supplier, agent }, pst] = await Promise.all([
     api('/api/shop/account'),
     pushState(S.config.vapid_public_key).catch(() => 'unsupported'),
   ]);
@@ -579,6 +586,14 @@ async function viewAccount() {
         <button class="btn">Cambia password</button>
       </form>
     </section>
+    ${agent ? html`<section class="sheet">
+      <h2>Il tuo agente</h2>
+      <p style="margin-bottom:.75rem"><strong>${agent.name}</strong></p>
+      <div class="actions">
+        ${agent.phone ? html`<a class="btn" href="tel:${agent.phone}">${icon('phone')} Chiama</a><a class="btn" href="${waLink(agent.phone)}" target="_blank" rel="noopener">${icon('wa')} WhatsApp</a>` : ''}
+        ${agent.email ? html`<a class="btn" href="mailto:${agent.email}">Email</a>` : ''}
+      </div>
+    </section>` : ''}
     <section class="sheet">
       <h2>${supplier.name}</h2>
       <p class="muted small">${supplier.address}</p>

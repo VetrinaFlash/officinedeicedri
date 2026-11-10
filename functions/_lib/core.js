@@ -93,6 +93,32 @@ export function effectivePrice(product, customer, customPrice) {
   return Math.round(product.price * (1 - disc / 100));
 }
 
+// ---------- promozioni ----------
+export function promoPrice(promo, listPrice) {
+  return promo.kind === 'prezzo' ? Math.round(promo.value) : Math.round(listPrice * (1 - Number(promo.value) / 100));
+}
+/** Promozioni attive oggi per il cliente (tutte o della sua zona), indicizzate per prodotto. */
+export async function activePromos(env, customer) {
+  const today = nowRome().date;
+  const { results } = await env.DB.prepare(`SELECT * FROM promotions WHERE active = 1 AND starts_on <= ?1 AND ends_on >= ?1
+    AND (zone_id IS NULL OR zone_id = ?2)`).bind(today, customer?.zone_id ?? -1).all();
+  const byProduct = new Map();
+  for (const pr of results) (byProduct.get(pr.product_id) || byProduct.set(pr.product_id, []).get(pr.product_id)).push(pr);
+  return byProduct;
+}
+/** Prezzo finale: il migliore tra prezzo cliente e promozione. */
+function withPromo(p, customer, customPrice, promos) {
+  const regular = effectivePrice(p, customer, customPrice);
+  let best = null;
+  for (const pr of promos.get(p.id) || []) {
+    const v = promoPrice(pr, p.price);
+    if (v < regular && (!best || v < best.price)) best = { price: v, promo: pr };
+  }
+  return best
+    ? { price: best.price, regular_price: regular, promo: { id: best.promo.id, title: best.promo.title, description: best.promo.description, ends_on: best.promo.ends_on } }
+    : { price: regular, regular_price: regular, promo: null };
+}
+
 /** Prodotti ordinabili da un cliente con prezzo effettivo. */
 export async function catalogFor(env, customer) {
   const { results } = await env.DB.prepare(`
@@ -104,6 +130,7 @@ export async function catalogFor(env, customer) {
       AND (NOT EXISTS (SELECT 1 FROM product_visibility v WHERE v.product_id = p.id)
            OR EXISTS (SELECT 1 FROM product_visibility v WHERE v.product_id = p.id AND v.customer_id = ?1))
     ORDER BY p.sort, p.name`).bind(customer.id).all();
+  const promos = await activePromos(env, customer);
   return results.map(p => ({
     id: p.id, sku: p.sku, name: p.name, description: p.description, category_id: p.category_id,
     unit: p.unit, pack: p.pack, vat_rate: p.vat_rate, min_qty: p.min_qty, step_qty: p.step_qty,
@@ -111,7 +138,7 @@ export async function catalogFor(env, customer) {
     stock: p.stock, featured: p.featured, favorite: p.favorite,
     image: p.image_key ? `/api/img/${p.image_key}` : (p.image_url || null),
     list_price: p.price,
-    price: effectivePrice(p, customer, p.custom_price),
+    ...withPromo(p, customer, p.custom_price, promos),
   }));
 }
 
@@ -200,7 +227,8 @@ export async function createOrder(env, { customer, by, items, delivery_date, not
     if (!skipRules && !validQty(qty, p)) fail(400, `Quantità non valida per ${p.name} (minimo ${p.min_qty}, multipli di ${p.step_qty}).`);
     if (skipRules && !(qty > 0)) fail(400, `Quantità non valida per ${p.name}.`);
     if (!skipRules && p.stock !== null && qty > p.stock) fail(409, `Per ${p.name} sono disponibili solo ${p.stock} ${p.unit}.`);
-    lines.push({ product_id: p.id, sku: p.sku, name: p.name, unit: p.unit, pack: p.pack, qty, price: p.price, vat_rate: p.vat_rate });
+    lines.push({ product_id: p.id, sku: p.sku, name: p.name, unit: p.unit, pack: p.pack, qty, price: p.price, vat_rate: p.vat_rate,
+      list_price: p.promo ? p.regular_price : null, promo_id: p.promo?.id || null });
   }
   const totals = computeTotals(lines, zone);
   if (!skipRules) {
@@ -211,16 +239,19 @@ export async function createOrder(env, { customer, by, items, delivery_date, not
   const id = shortId();
   const year = Number(nowRome().date.slice(0, 4));
   const status = settings.auto_confirm === '1' && !skipRules ? 'confermato' : 'nuovo';
+  const agent = customer.agent_id
+    ? await env.DB.prepare("SELECT id, commission FROM users WHERE id = ? AND role = 'agente'").bind(customer.agent_id).first() : null;
+  const createdNote = by.role === 'admin' ? `Inserito dal fornitore (${source})` : by.role === 'agente' ? `Inserito dall'agente ${by.name || ''}`.trim() : 'Inviato dal cliente';
   const stmts = [
-    env.DB.prepare(`INSERT INTO orders (id, year, seq, customer_id, user_id, source, status, delivery_date, notes, subtotal, delivery_fee, vat_total, total)
-      VALUES (?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM orders WHERE year = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, year, year, customer.id, by.id, source, status, delivery_date || null, notes || null,
+    env.DB.prepare(`INSERT INTO orders (id, year, seq, customer_id, user_id, agent_id, commission_rate, source, status, delivery_date, notes, subtotal, delivery_fee, vat_total, total)
+      VALUES (?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM orders WHERE year = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, year, year, customer.id, by.id, agent?.id ?? null, agent?.commission ?? 0, source, status, delivery_date || null, notes || null,
         totals.subtotal, totals.delivery_fee, totals.vat_total, totals.total),
-    ...lines.map(l => env.DB.prepare(`INSERT INTO order_items (order_id, product_id, sku, name, unit, pack, qty, price, vat_rate, line_total)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, l.product_id, l.sku, l.name, l.unit, l.pack, l.qty, l.price, l.vat_rate, l.line_total)),
+    ...lines.map(l => env.DB.prepare(`INSERT INTO order_items (order_id, product_id, sku, name, unit, pack, qty, price, vat_rate, line_total, list_price, promo_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, l.product_id, l.sku, l.name, l.unit, l.pack, l.qty, l.price, l.vat_rate, l.line_total, l.list_price, l.promo_id)),
     ...lines.map(l => env.DB.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock IS NOT NULL').bind(l.qty, l.product_id)),
     env.DB.prepare('INSERT INTO order_events (order_id, type, status, note, user_id) VALUES (?, ?, ?, ?, ?)')
-      .bind(id, 'status', status, by.role === 'admin' ? `Inserito dal fornitore (${source})` : 'Inviato dal cliente', by.id),
+      .bind(id, 'status', status, createdNote, by.id),
   ];
   await env.DB.batch(stmts);
   return getOrder(env, id);
@@ -231,16 +262,19 @@ export async function adminCatalogFor(env, customer) {
     SELECT p.*, cp.price AS custom_price FROM products p
     LEFT JOIN customer_prices cp ON cp.product_id = p.id AND cp.customer_id = ?
     WHERE p.archived = 0`).bind(customer.id).all();
-  return results.map(p => ({ ...p, price: effectivePrice(p, customer, p.custom_price) }));
+  const promos = await activePromos(env, customer);
+  return results.map(p => ({ ...p, list_price: p.price, ...withPromo(p, customer, p.custom_price, promos) }));
 }
 
 export async function getOrder(env, id) {
   const order = await env.DB.prepare(`
     SELECT o.*, c.business_name, c.contact_name, c.phone, c.email AS customer_email, c.delivery_address, c.address, c.city,
-           c.province, c.zip, c.delivery_notes, c.vat, c.zone_id, z.name AS zone_name, u.name AS user_name
+           c.province, c.zip, c.delivery_notes, c.vat, c.zone_id, c.agent_id AS customer_agent_id,
+           z.name AS zone_name, u.name AS user_name, u.role AS user_role, a.name AS agent_name, a.phone AS agent_phone
     FROM orders o JOIN customers c ON c.id = o.customer_id
     LEFT JOIN zones z ON z.id = c.zone_id
     LEFT JOIN users u ON u.id = o.user_id
+    LEFT JOIN users a ON a.id = c.agent_id
     WHERE o.id = ?`).bind(id).first();
   if (!order) return null;
   const [{ results: items }, { results: events }] = await Promise.all([
@@ -256,10 +290,11 @@ export async function getOrder(env, id) {
 export const orderNumber = o => `${o.year}/${String(o.seq).padStart(4, '0')}`;
 
 // notifiche ordine
-export async function notifyNewOrder(env, request, order, settings) {
+export async function notifyNewOrder(env, request, order, settings, by) {
   const url = `/admin/#/ordini/${order.id}`;
-  await notifyUsers(env, await adminIds(env), {
-    title: `Nuovo ordine da ${order.business_name}`,
+  const staff = [...await adminIds(env), order.customer_agent_id].filter(id => id && id !== by?.id);
+  await notifyUsers(env, staff, {
+    title: by?.role === 'agente' ? `Ordine di ${by.name || 'un agente'} per ${order.business_name}` : `Nuovo ordine da ${order.business_name}`,
     body: `${order.number} · ${euro(order.total)} · consegna ${fmtDateIt(order.delivery_date)}`,
     url, tag: `order-${order.id}`,
   });

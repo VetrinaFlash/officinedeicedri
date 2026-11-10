@@ -2,14 +2,14 @@ import { json, HttpError, nowRome, fmtDateIt } from '../_lib/util.js';
 import { currentUser, getSettings, zoneFor, deliveryOptions, notifyUsers } from '../_lib/core.js';
 import { authRoutes } from '../_lib/routes-auth.js';
 import { clientRoutes } from '../_lib/routes-client.js';
-import { adminRoutes } from '../_lib/routes-admin.js';
+import { adminRoutes, AGENT_ROUTES } from '../_lib/routes-admin.js';
 import { ensureSchema } from '../_lib/migrate.js';
 
 function compile(routes, role) {
   return routes.map(([method, path, handler]) => {
     const keys = [];
     const re = new RegExp('^' + path.replace(/:(\w+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$');
-    return { method, re, keys, handler, role };
+    return { method, re, keys, handler, role, agent: role === 'admin' && AGENT_ROUTES.has(`${method} ${path}`) };
   });
 }
 
@@ -90,7 +90,7 @@ export async function onRequest(context) {
       if (!m) continue;
       if (r.role !== 'public') {
         if (!user) return json({ error: 'Sessione scaduta: accedi di nuovo.' }, 401);
-        if (user.role !== r.role) return json({ error: 'Non hai i permessi per questa operazione.' }, 403);
+        if (user.role !== r.role && !(r.agent && user.role === 'agente')) return json({ error: 'Non hai i permessi per questa operazione.' }, 403);
       }
       const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
       const out = await r.handler({ env, request, url, user, params });

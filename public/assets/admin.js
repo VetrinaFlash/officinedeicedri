@@ -9,19 +9,35 @@ const S = { me: null, config: null, zones: null, categories: null };
 const DAYS = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'];
 const SOURCES = { app: 'App', telefono: 'Telefono', whatsapp: 'WhatsApp', email: 'Email', agente: 'Agente' };
 
-const NAV = [
+const NAV_ADMIN = [
   ['/', 'Panoramica'],
   ['/ordini', 'Ordini', 'nuovi'],
   ['/preparazione', 'Preparazione e consegne'],
   ['/nuovo-ordine', 'Inserisci ordine'],
   null,
   ['/prodotti', 'Prodotti'],
+  ['/promozioni', 'Promozioni'],
   ['/clienti', 'Clienti'],
+  ['/agenti', 'Agenti'],
+  ['/provvigioni', 'Provvigioni'],
   ['/zone', 'Zone e consegne'],
   ['/comunicazioni', 'Comunicazioni'],
   null,
   ['/impostazioni', 'Impostazioni'],
 ];
+const NAV_AGENT = [
+  ['/', 'Panoramica'],
+  ['/ordini', 'Ordini dei miei clienti', 'nuovi'],
+  ['/nuovo-ordine', 'Inserisci ordine'],
+  ['/clienti', 'I miei clienti'],
+  null,
+  ['/promozioni', 'Offerte in corso'],
+  ['/comunicazioni', 'Messaggi ai clienti'],
+  ['/provvigioni', 'Le mie provvigioni'],
+  null,
+  ['/account', 'Account'],
+];
+const isAgent = () => S.me?.role === 'agente';
 
 async function start() {
   registerSW();
@@ -29,7 +45,7 @@ async function start() {
   try {
     const [{ user }, config] = await Promise.all([api('/api/auth/me'), api('/api/public/config')]);
     S.config = config;
-    if (!user || user.role !== 'admin') { adminLogin(); return; }
+    if (!user || !['admin', 'agente'].includes(user.role)) { adminLogin(); return; }
     S.me = user;
   } catch (e) { mount(app, html`<div class="loading">${e.message}</div>`); return; }
   shell();
@@ -45,7 +61,12 @@ async function start() {
     ['/clienti/:id', viewCustomer],
     ['/zone', viewZones],
     ['/comunicazioni', viewAnnouncements],
-    ['/impostazioni', viewSettings],
+    ['/promozioni', viewPromotions],
+    ['/provvigioni', viewCommissions],
+    ...(isAgent() ? [['/account', viewAccount]] : [
+      ['/agenti', viewAgents],
+      ['/impostazioni', viewSettings],
+    ]),
   ], () => go('/'));
   const wrapped = () => { $$('.modal-wrap').forEach(m => m.remove()); markNav(); $('.side').classList.remove('open'); window.scrollTo(0, 0); run(); };
   window.removeEventListener('hashchange', run);
@@ -64,11 +85,33 @@ function adminLogin() {
       <input type="text" name="username" value="pannello" autocomplete="username" hidden>
       <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus></div>
       <button class="btn primary block">Entra</button>
-    </form></div></div>`);
+    </form>
+    <form id="fa" class="hidden">
+      <div class="field"><label for="ae">Email</label><input id="ae" name="email" type="email" autocomplete="username" required></div>
+      <div class="field"><label for="ap">Password</label><input id="ap" name="password" type="password" autocomplete="current-password" required></div>
+      <button class="btn primary block">Entra come agente</button>
+      <p class="auth-foot"><a href="/#/password-dimenticata">Password dimenticata?</a></p>
+    </form>
+    <p class="auth-foot"><button class="btn ghost small" id="sw" type="button">Sei un agente? Accedi con la tua email</button></p>
+    </div></div>`);
+  $('#sw').onclick = () => {
+    const agent = $('#f').classList.toggle('hidden');
+    $('#fa').classList.toggle('hidden', !agent);
+    $('#sw').textContent = agent ? 'Sei il fornitore? Accedi con la password del pannello' : 'Sei un agente? Accedi con la tua email';
+    (agent ? $('#ae') : $('#password')).focus();
+  };
   $('#f').onsubmit = e => {
     e.preventDefault();
     withBusy(e.submitter, async () => {
       await api('/api/auth/admin', { method: 'POST', body: { password: e.target.password.value } });
+      location.reload();
+    });
+  };
+  $('#fa').onsubmit = e => {
+    e.preventDefault();
+    withBusy(e.submitter, async () => {
+      const r = await api('/api/auth/login', { method: 'POST', body: formData(e.target) });
+      if (r.role === 'cliente') { location.href = '/'; return; }
       location.reload();
     });
   };
@@ -80,11 +123,11 @@ function shell() {
   mount(app, html`
     <div class="admin">
       <aside class="side" id="side">
-        <a class="brand" href="#/">${c.logo_url ? html`<img src="${c.logo_url}" alt="" onerror="this.remove()">` : ''}<span>${c.company_name}<small>Gestionale ordini</small></span></a>
-        <nav aria-label="Menu">${NAV.map(n => n ? html`<a href="#${n[0]}" data-nav="${n[0]}">${n[1]}${n[2] ? html`<span class="count hidden" data-count="${n[2]}"></span>` : ''}</a>` : raw('<div class="sep"></div>'))}</nav>
+        <a class="brand" href="#/">${c.logo_url ? html`<img src="${c.logo_url}" alt="" onerror="this.remove()">` : ''}<span>${c.company_name}<small>${isAgent() ? 'Area agenti' : 'Gestionale ordini'}</small></span></a>
+        <nav aria-label="Menu">${(isAgent() ? NAV_AGENT : NAV_ADMIN).map(n => n ? html`<a href="#${n[0]}" data-nav="${n[0]}">${n[1]}${n[2] ? html`<span class="count hidden" data-count="${n[2]}"></span>` : ''}</a>` : raw('<div class="sep"></div>'))}</nav>
         <div class="foot">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem">
-            <span>Amministratore</span>
+            <span>${isAgent() ? S.me.name || S.me.email : 'Amministratore'}</span>
             <button class="icon-btn" id="bell" aria-label="Notifiche" style="color:#fff">${icon('bell')}</button>
           </div>
           <a href="/" target="_blank" style="color:var(--citron)">Vedi l'app clienti</a> ·
@@ -132,7 +175,7 @@ async function pushBanner() {
   const st = await pushState(S.config.vapid_public_key).catch(() => 'unsupported');
   const box = $('#pushbanner');
   if (st !== 'off') { mount(box, ''); return; }
-  mount(box, html`<div class="push-banner"><span><strong>Ricevi i nuovi ordini in tempo reale.</strong> Attiva le notifiche su questo dispositivo.</span>
+  mount(box, html`<div class="push-banner"><span><strong>Ricevi i nuovi ordini ${isAgent() ? 'dei tuoi clienti ' : ''}in tempo reale.</strong> Attiva le notifiche su questo dispositivo.</span>
     <button class="btn primary small" id="pushon">Attiva notifiche</button></div>`);
   $('#pushon').onclick = e => withBusy(e.target, async () => { await enablePush(S.config.vapid_public_key); toast('Notifiche attivate'); pushBanner(); });
 }
@@ -159,12 +202,15 @@ async function viewDashboard() {
   const chart = html`<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Imponibile degli ultimi 30 giorni">
     ${d.series.map((s, i) => { const h = Math.max(s.imponibile ? 2 : 0, (s.imponibile / max) * H); return raw(`<rect class="${s.d === d.today ? 'today' : ''}" x="${i * bw + 1.5}" y="${H - h}" width="${bw - 3}" height="${h}" rx="2"><title>${dayShort(s.d)}: ${euro(s.imponibile)} (${s.ordini} ordini)</title></rect>`); })}
     </svg><div class="chart-axis"><span>${dayShort(d.series[0].d)}</span><span>oggi</span></div>`;
-  const body = page('Panoramica', html`<a class="btn primary" href="#/nuovo-ordine">Inserisci ordine</a>`, html`
+  const agent = isAgent();
+  const body = page(agent ? `Ciao ${(S.me.name || '').split(' ')[0]}` : 'Panoramica', html`<a class="btn primary" href="#/nuovo-ordine">Inserisci ordine</a>`, html`
     <div class="kpis">
-      <a class="kpi ${c.nuovi ? 'alert' : ''}" href="#/ordini?status=nuovo"><b>${c.nuovi || 0}</b><span>da confermare</span></a>
-      <a class="kpi" href="#/preparazione?date=${d.today}"><b>${c.oggi || 0}</b><span>in consegna oggi</span></a>
-      <a class="kpi" href="#/preparazione?date=${d.tomorrow}"><b>${c.domani || 0}</b><span>in consegna domani</span></a>
+      <a class="kpi ${c.nuovi ? 'alert' : ''}" href="#/ordini?status=nuovo"><b>${c.nuovi || 0}</b><span>${agent ? 'in attesa di conferma' : 'da confermare'}</span></a>
+      ${agent ? html`<a class="kpi" href="#/ordini?delivery=${d.tomorrow}"><b>${c.domani || 0}</b><span>in consegna domani</span></a>`
+        : html`<a class="kpi" href="#/preparazione?date=${d.today}"><b>${c.oggi || 0}</b><span>in consegna oggi</span></a>
+      <a class="kpi" href="#/preparazione?date=${d.tomorrow}"><b>${c.domani || 0}</b><span>in consegna domani</span></a>`}
       <div class="kpi"><b class="num">${euro(d.month.imponibile)}</b><span>imponibile del mese${diff !== null ? ` · ${diff >= 0 ? '+' : ''}${diff}% sul mese scorso` : ''}</span></div>
+      ${agent ? html`<a class="kpi" href="#/provvigioni"><b class="num">${euro(d.month.provvigioni)}</b><span>provvigioni maturate nel mese</span></a>` : ''}
       <div class="kpi"><b>${d.month.clienti}</b><span>clienti che hanno ordinato nel mese</span></div>
     </div>
     <div class="grid2">
@@ -180,6 +226,8 @@ async function viewDashboard() {
       <section class="panel"><h2>Clienti da sentire <span class="muted small">nessun ordine da 3 settimane</span></h2>
         ${d.dormant.length ? html`<ul class="list-plain">${d.dormant.map(cu => html`<li><a href="#/clienti/${cu.id}">${cu.business_name}</a>
           <span class="muted small">${relDays(cu.ultimo)}</span>${cu.phone ? html`<a class="btn small" href="tel:${cu.phone}">${icon('phone')} Chiama</a>` : ''}</li>`)}</ul>` : html`<p class="muted">Tutti i clienti attivi hanno ordinato di recente.</p>`}</section>
+      ${d.promos.length ? html`<section class="panel"><h2>Offerte in corso <a href="#/promozioni">${agent ? 'Tutte' : 'Gestisci'}</a></h2><ul class="list-plain">${d.promos.map(pr => html`<li><span>${pr.title || pr.name} <span class="muted small">${pr.pack || ''}</span></span>
+        <span class="tag">${pr.kind === 'sconto' ? `-${qty(pr.value)}%` : euro(pr.value)} fino al ${dayShort(pr.ends_on)}</span></li>`)}</ul></section>` : ''}
       ${d.low_stock.length ? html`<section class="panel"><h2>Scorte basse <a href="#/prodotti">Prodotti</a></h2><ul class="list-plain">${d.low_stock.map(p => html`<li><span>${p.name} <span class="muted small">${p.pack || ''}</span></span><span class="tag ${p.stock <= 0 ? 'warn' : ''}">${qty(p.stock)} ${p.unit}</span></li>`)}</ul></section>` : ''}
     </div>`);
   void body;
@@ -189,23 +237,26 @@ async function viewDashboard() {
 function hashParams() { return new URLSearchParams((location.hash.split('?')[1]) || ''); }
 async function viewOrders() {
   const p = hashParams();
-  const st = { status: p.get('status') ?? 'aperti', q: p.get('q') || '', delivery: p.get('delivery') || '', customer_id: p.get('customer_id') || '', offset: 0 };
-  const body = page('Ordini', html`<a class="btn" href="/api/admin/export/orders.csv" id="csv">Esporta CSV</a><a class="btn primary" href="#/nuovo-ordine">Inserisci ordine</a>`, html`
+  const st = { status: p.get('status') ?? 'aperti', q: p.get('q') || '', delivery: p.get('delivery') || '', customer_id: p.get('customer_id') || '', agent_id: p.get('agent_id') || '', offset: 0 };
+  const agent = isAgent();
+  const agents = agent ? [] : (await api('/api/admin/agents')).items;
+  const body = page(agent ? 'Ordini dei miei clienti' : 'Ordini', html`${agent ? '' : html`<a class="btn" href="/api/admin/export/orders.csv" id="csv">Esporta CSV</a>`}<a class="btn primary" href="#/nuovo-ordine">Inserisci ordine</a>`, html`
     <div class="toolbar">
       <div class="seg" role="group" aria-label="Stato">${[['aperti', 'Aperti'], ['nuovo', 'Da confermare'], ['confermato', 'Confermati'], ['in_consegna', 'In consegna'], ['consegnato', 'Consegnati'], ['annullato', 'Annullati'], ['', 'Tutti']]
         .map(([k, l]) => html`<button data-st="${k}" aria-pressed="${st.status === k}">${l}</button>`)}</div>
       <input type="search" class="grow" id="q" placeholder="Cerca cliente, numero o note" value="${st.q}" aria-label="Cerca">
       <label class="sr" for="dd">Data di consegna</label><input type="date" id="dd" value="${st.delivery}" title="Data di consegna">
+      ${agents.length ? html`<select id="af" aria-label="Agente"><option value="">Tutti gli agenti</option>${agents.map(a => html`<option value="${a.id}" ${sel(a.id, st.agent_id)}>${a.name}</option>`)}</select>` : ''}
     </div>
     <div id="bulk" class="toolbar hidden"></div>
     <div class="table-wrap"><table class="table"><thead><tr>
-      <th><input type="checkbox" id="all" aria-label="Seleziona tutti"></th><th>Ordine</th><th>Cliente</th><th>Consegna</th><th>Stato</th><th>Origine</th><th class="num">Totale</th>
+      <th>${agent ? '' : html`<input type="checkbox" id="all" aria-label="Seleziona tutti">`}</th><th>Ordine</th><th>Cliente</th><th>Consegna</th><th>Stato</th><th>Origine</th><th class="num">Totale</th>
     </tr></thead><tbody id="rows"><tr><td colspan="7" class="loading">Caricamento…</td></tr></tbody></table></div>
     <p><button class="btn hidden" id="more">Mostra altri</button></p>`);
   let items = [];
   const load = async (append = false) => {
     const qs = new URLSearchParams({ limit: 50, offset: st.offset });
-    for (const k of ['status', 'q', 'delivery', 'customer_id']) if (st[k]) qs.set(k, st[k]);
+    for (const k of ['status', 'q', 'delivery', 'customer_id', 'agent_id']) if (st[k]) qs.set(k, st[k]);
     try {
       const r = await api(`/api/admin/orders?${qs}`);
       items = append ? items.concat(r.items) : r.items;
@@ -215,9 +266,9 @@ async function viewOrders() {
   };
   const renderRows = () => {
     mount($('#rows'), items.length ? html`${items.map(o => html`<tr class="click" data-id="${o.id}">
-      <td><input type="checkbox" data-pick="${o.id}" aria-label="Seleziona ${o.number}"></td>
+      <td>${agent ? '' : html`<input type="checkbox" data-pick="${o.id}" aria-label="Seleziona ${o.number}">`}</td>
       <td><strong>${o.number}</strong><div class="muted small">${dateTime(o.created_at)}</div></td>
-      <td>${o.business_name}${o.zone_name ? html`<div class="muted small">${o.zone_name}</div>` : ''}${o.notes ? html`<div class="small" title="${o.notes}">📝 ${o.notes.slice(0, 50)}</div>` : ''}</td>
+      <td>${o.business_name}${o.zone_name || (!agent && o.agent_name) ? html`<div class="muted small">${[o.zone_name, !agent && o.agent_name ? `agente ${o.agent_name}` : null].filter(Boolean).join(' · ')}</div>` : ''}${o.notes ? html`<div class="small" title="${o.notes}">📝 ${o.notes.slice(0, 50)}</div>` : ''}</td>
       <td>${capFirst(dayShort(o.delivery_date))}</td>
       <td>${statusPill(o.status)}${o.paid ? html` <span class="tag">pagato</span>` : ''}</td>
       <td class="small">${SOURCES[o.source] || o.source}</td>
@@ -251,7 +302,8 @@ async function viewOrders() {
   };
   $('#q').oninput = debounce(e => { st.q = e.target.value; st.offset = 0; load(); }, 300);
   $('#dd').onchange = e => { st.delivery = e.target.value; st.offset = 0; load(); };
-  $('#csv').onclick = e => {
+  $('#af')?.addEventListener('change', e => { st.agent_id = e.target.value; st.offset = 0; load(); });
+  $('#csv')?.addEventListener('click', e => {
     e.preventDefault();
     const m = modal(html`<h2>Esporta ordini</h2><p class="muted small">Un file CSV con una riga per prodotto, apribile in Excel. Gli ordini annullati sono esclusi.</p>
       <div class="field-row"><div class="field"><label for="ef">Dal</label><input type="date" id="ef" value="${addDays(todayIso(), -30)}"></div>
@@ -260,7 +312,7 @@ async function viewOrders() {
     const upd = () => { m.el.querySelector('#dl').href = `/api/admin/export/orders.csv?from=${m.el.querySelector('#ef').value}&to=${m.el.querySelector('#et').value}`; };
     m.el.oninput = upd; upd();
     m.el.querySelector('#dl').addEventListener('click', () => setTimeout(m.close, 300));
-  };
+  });
   load();
 }
 
@@ -278,10 +330,11 @@ async function viewOrder({ id }) {
   const idx = STATUS_FLOW.indexOf(o.status);
   const next = o.status !== 'annullato' ? STATUS_FLOW[idx + 1] : null;
   const addr = o.delivery_address || [o.address, o.zip, o.city, o.province].filter(Boolean).join(', ');
+  const agent = isAgent();
   const body = page(`Ordine ${o.number}`, html`
       <button class="btn" onclick="window.print()">${icon('print')} Stampa</button>
       ${o.phone ? html`<a class="btn" href="${waLink(o.phone, `Buongiorno, vi scriviamo per l'ordine ${o.number}.`)}" target="_blank" rel="noopener">${icon('wa')} WhatsApp</a>` : ''}
-      ${next ? html`<button class="btn primary" data-status="${next}">Segna come ${STATUS_LABEL[next].toLowerCase()}</button>` : ''}`, html`
+      ${next && !agent ? html`<button class="btn primary" data-status="${next}">Segna come ${STATUS_LABEL[next].toLowerCase()}</button>` : ''}`, html`
     ${printHeader(`Ordine ${o.number} · consegna ${dayLong(o.delivery_date)}`)}
     <div class="grid2" style="grid-template-columns:minmax(0,2fr) minmax(280px,1fr)">
       <div style="display:grid;gap:1.25rem;min-width:0">
@@ -295,13 +348,15 @@ async function viewOrder({ id }) {
             <dt>Consegna</dt><dd>${capFirst(dayLong(o.delivery_date))}${o.zone_name ? html` <span class="muted">· ${o.zone_name}</span>` : ''}</dd>
             <dt>Indirizzo</dt><dd>${addr || '—'}${o.delivery_notes ? html`<div class="muted small">${o.delivery_notes}</div>` : ''}</dd>
             <dt>Ricevuto</dt><dd>${dateTime(o.created_at)} · ${SOURCES[o.source] || o.source}${o.user_name ? ` · ${o.user_name}` : ''}</dd>
+            ${o.agent_name && !agent ? html`<dt>Agente</dt><dd>${o.agent_name}${o.commission_rate ? html` <span class="muted">· provvigione ${qty(o.commission_rate)}% = ${euro(Math.round(o.subtotal * o.commission_rate / 100))}</span>` : ''}</dd>` : ''}
+            ${agent && o.commission_rate ? html`<dt>Provvigione</dt><dd>${qty(o.commission_rate)}% = <strong>${euro(Math.round(o.subtotal * o.commission_rate / 100))}</strong></dd>` : ''}
             ${o.notes ? html`<dt>Note cliente</dt><dd><strong>${o.notes}</strong></dd>` : ''}
           </dl>
         </section>
         <section class="panel" id="lines"></section>
       </div>
       <div style="display:grid;gap:1.25rem;min-width:0" class="no-print">
-        <section class="panel"><h2>Stato</h2>
+        ${agent ? html`<section class="panel"><h2>Stato</h2><p>${statusPill(o.status)}</p><p class="hint">Lo stato lo aggiorna il fornitore. Per modifiche all'ordine scrivi al fornitore o al cliente.</p></section>` : html`<section class="panel"><h2>Stato</h2>
           <div class="status-steps">${[...STATUS_FLOW, 'annullato'].map(s => html`<button data-status="${s}" aria-pressed="${o.status === s}" class="${s === next ? 'next' : ''}">${STATUS_LABEL[s]}</button>`)}</div>
           <p class="hint">Il cliente riceve una notifica a ogni cambio di stato.</p>
         </section>
@@ -313,7 +368,7 @@ async function viewOrder({ id }) {
             <label class="check"><input type="checkbox" name="paid" ${chk(o.paid)}> Pagato</label>
             <button class="btn">Salva</button>
           </form>
-        </section>
+        </section>`}
         <section class="panel"><h2>Scrivi al cliente</h2>
           <form id="msg"><div class="field"><label for="mt" class="sr">Messaggio</label><textarea id="mt" name="text" placeholder="Es. Il cedro candito arriva giovedì, il resto domani." required></textarea></div>
           <button class="btn">Invia notifica</button></form>
@@ -323,6 +378,11 @@ async function viewOrder({ id }) {
       </div>
     </div>`);
   renderLines(o, false);
+  $('#msg').onsubmit = e => {
+    e.preventDefault();
+    withBusy(e.submitter, async () => { await api(`/api/admin/orders/${o.id}/message`, { method: 'POST', body: formData(e.target) }); toast('Messaggio inviato'); viewOrder({ id: o.id }); });
+  };
+  if (agent) return;
   body.addEventListener('click', e => {
     const sb = e.target.closest('[data-status]');
     if (sb) changeStatus(o, sb.dataset.status, sb);
@@ -336,10 +396,6 @@ async function viewOrder({ id }) {
       toast(b.delivery_date !== o.delivery_date ? 'Salvato, cliente avvisato del cambio data' : 'Salvato');
       viewOrder({ id: o.id });
     });
-  };
-  $('#msg').onsubmit = e => {
-    e.preventDefault();
-    withBusy(e.submitter, async () => { await api(`/api/admin/orders/${o.id}/message`, { method: 'POST', body: formData(e.target) }); toast('Messaggio inviato'); viewOrder({ id: o.id }); });
   };
 }
 async function changeStatus(o, status, btn) {
@@ -359,16 +415,16 @@ async function changeStatus(o, status, btn) {
 async function renderLines(o, editing) {
   const box = $('#lines');
   if (!editing) {
-    mount(box, html`<h2>Prodotti <button class="btn small no-print" id="edit">Modifica righe</button></h2>
+    mount(box, html`<h2>Prodotti ${isAgent() ? '' : html`<button class="btn small no-print" id="edit">Modifica righe</button>`}</h2>
       <table class="items"><thead><tr><th>Prodotto</th><th class="num">Q.tà</th><th class="num">Prezzo</th><th class="num">IVA</th><th class="num">Totale</th></tr></thead>
-      <tbody>${o.items.map(i => html`<tr><td>${i.name}<div class="muted small">${[i.sku, i.pack].filter(Boolean).join(' · ')}</div></td>
-        <td class="num"><strong>${qty(i.qty)}</strong> ${i.unit}</td><td class="num">${euro(i.price)}</td><td class="num">${i.vat_rate}%</td><td class="num">${euro(i.line_total)}</td></tr>`)}</tbody></table>
+      <tbody>${o.items.map(i => html`<tr><td>${i.name}${i.promo_id ? html` <span class="tag promo">offerta</span>` : ''}<div class="muted small">${[i.sku, i.pack].filter(Boolean).join(' · ')}</div></td>
+        <td class="num"><strong>${qty(i.qty)}</strong> ${i.unit}</td><td class="num">${euro(i.price)}${i.list_price ? html`<div class="muted small"><s>${euro(i.list_price)}</s></div>` : ''}</td><td class="num">${i.vat_rate}%</td><td class="num">${euro(i.line_total)}</td></tr>`)}</tbody></table>
       <table class="totals" style="max-width:320px;margin:1rem 0 0 auto">
         <tr><td>Imponibile</td><td class="num">${euro(o.subtotal)}</td></tr>
         ${o.delivery_fee ? html`<tr><td>Consegna</td><td class="num">${euro(o.delivery_fee)}</td></tr>` : ''}
         <tr><td>IVA</td><td class="num">${euro(o.vat_total)}</td></tr>
         <tr class="grand"><td>Totale</td><td class="num">${euro(o.total)}</td></tr></table>`);
-    $('#edit').onclick = () => renderLines(o, true);
+    $('#edit')?.addEventListener('click', () => renderLines(o, true));
     return;
   }
   const { items: catalog } = await api(`/api/admin/customers/${o.customer_id}/catalog`);
@@ -490,7 +546,7 @@ async function viewNewOrder() {
   const preset = hashParams().get('customer_id');
   const st = { customer: null, catalog: [], dates: [], lines: new Map(), q: '' };
   mount(body, html`
-    <p class="muted">Per gli ordini ricevuti al telefono, su WhatsApp o dall'agente: niente vincoli di orario o minimo d'ordine.</p>
+    <p class="muted">${isAgent() ? 'Ordine per un tuo cliente: arriva subito al fornitore, che lo conferma. Prezzi e offerte sono quelli del cliente.' : 'Per gli ordini ricevuti al telefono, su WhatsApp o dall\'agente: niente vincoli di orario o minimo d\'ordine.'}</p>
     <div class="grid2" style="grid-template-columns:minmax(0,3fr) minmax(280px,2fr)">
       <section class="panel">
         <div class="field"><label for="cust">Cliente</label>
@@ -513,7 +569,7 @@ async function viewNewOrder() {
     mount($('#prods'), html`<div class="searchbar">${icon('search')}<input type="search" id="pq" placeholder="Cerca prodotto" value="${st.q}" aria-label="Cerca prodotto"></div>
       <div class="table-wrap"><table class="table"><thead><tr><th>Prodotto</th><th class="num">Prezzo</th><th class="num">Quantità</th></tr></thead><tbody>
       ${list.map(p => html`<tr><td>${p.name}<div class="muted small">${[p.sku, p.pack].filter(Boolean).join(' · ')}${!p.available ? ' · non disponibile' : ''}${p.stock !== null ? ` · giacenza ${qty(p.stock)}` : ''}</div></td>
-        <td class="num">${euro(p.price)}<div class="muted small">/ ${p.unit}</div></td>
+        <td class="num">${euro(p.price)}${p.promo ? html` <span class="tag promo">offerta</span><div class="muted small"><s>${euro(p.regular_price)}</s></div>` : html`<div class="muted small">/ ${p.unit}</div>`}</td>
         <td class="num"><input style="width:90px" inputmode="decimal" data-pid="${p.id}" value="${st.lines.get(p.id) ? String(st.lines.get(p.id)).replace('.', ',') : ''}" aria-label="Quantità ${p.name}"></td></tr>`)}
       </tbody></table></div>`);
     $('#pq').oninput = debounce(e => { st.q = e.target.value; drawProducts(); $('#pq').focus(); }, 200);
@@ -537,8 +593,8 @@ async function viewNewOrder() {
           <select id="nd" name="delivery_date">${st.dates.map(d => html`<option value="${d.date}">${dayLong(d.date)}</option>`)}<option value="__other">Altra data…</option></select>
           <input type="date" id="ndo" class="hidden" style="margin-top:.5rem" aria-label="Altra data"></div>
         <div class="field-row">
-          <div class="field"><label for="ns">Ricevuto via</label><select id="ns" name="source">${['telefono', 'whatsapp', 'email', 'agente'].map(s => html`<option value="${s}">${SOURCES[s]}</option>`)}</select></div>
-          <div class="field"><label for="nst">Stato iniziale</label><select id="nst" name="status"><option value="confermato">Confermato</option><option value="nuovo">Da confermare</option></select></div>
+          ${isAgent() ? '' : html`<div class="field"><label for="ns">Ricevuto via</label><select id="ns" name="source">${['telefono', 'whatsapp', 'email', 'agente'].map(s => html`<option value="${s}">${SOURCES[s]}</option>`)}</select></div>
+          <div class="field"><label for="nst">Stato iniziale</label><select id="nst" name="status"><option value="confermato">Confermato</option><option value="nuovo">Da confermare</option></select></div>`}
         </div>
         <div class="field"><label for="nn">Note</label><textarea id="nn" name="notes"></textarea></div>
         <label class="check"><input type="checkbox" name="notify_customer" checked> Invia conferma al cliente (notifica)</label>
@@ -763,9 +819,10 @@ function importModal(done) {
 
 // ---------- clienti ----------
 async function viewCustomers() {
-  const body = page('Clienti', html`<button class="btn primary" id="new">Nuovo cliente</button>`, html`
+  const agent = isAgent();
+  const body = page(agent ? 'I miei clienti' : 'Clienti', html`<button class="btn primary" id="new">Nuovo cliente</button>`, html`
     <div class="toolbar"><input type="search" class="grow" id="q" placeholder="Cerca per nome, città, P.IVA" aria-label="Cerca"></div>
-    <div class="table-wrap"><table class="table"><thead><tr><th>Cliente</th><th>Zona</th><th>Accesso</th><th class="num">Ordini</th><th>Ultimo ordine</th><th class="num">Imponibile 12 mesi</th></tr></thead>
+    <div class="table-wrap"><table class="table"><thead><tr><th>Cliente</th><th>Zona${agent ? '' : ' e agente'}</th><th>Accesso</th><th class="num">Ordini</th><th>Ultimo ordine</th><th class="num">Imponibile 12 mesi</th></tr></thead>
     <tbody id="rows"><tr><td colspan="6" class="loading">Caricamento…</td></tr></tbody></table></div>`);
   let items = [];
   const draw = () => {
@@ -773,17 +830,18 @@ async function viewCustomers() {
     const list = items.filter(c => !q || `${c.business_name} ${c.city || ''} ${c.vat || ''} ${c.email || ''}`.toLowerCase().includes(q));
     mount($('#rows'), list.length ? html`${list.map(c => html`<tr class="click" data-id="${c.id}">
       <td><strong>${c.business_name}</strong>${c.blocked ? html` <span class="tag warn">bloccato</span>` : ''}<div class="muted small">${[c.city, c.contact_name].filter(Boolean).join(' · ')}</div></td>
-      <td class="small">${c.zone_name || '—'}</td>
+      <td class="small">${c.zone_name || '—'}${!agent && c.agent_name ? html`<div class="muted">${c.agent_name}</div>` : ''}</td>
       <td>${c.active_users ? html`<span class="tag">attivo</span>` : c.users_count ? html`<span class="tag warn">invito in attesa</span>` : html`<span class="muted small">nessuno</span>`}</td>
       <td class="num">${c.orders_count}</td><td class="small">${c.last_order ? relDays(c.last_order) : '—'}</td><td class="num">${euro(c.revenue_year)}</td></tr>`)}`
-      : html`<tr><td colspan="6"><div class="empty"><h3>Nessun cliente</h3><p>Crea il primo cliente e mandagli l'invito: sceglierà la sua password e potrà ordinare.</p></div></td></tr>`);
+      : html`<tr><td colspan="6"><div class="empty"><h3>Nessun cliente</h3><p>${agent ? 'Aggiungi un cliente che hai acquisito: il fornitore riceve un avviso e ne imposta le condizioni.' : 'Crea il primo cliente e mandagli l\'invito: sceglierà la sua password e potrà ordinare.'}</p></div></td></tr>`);
   };
   body.onclick = e => { const r = e.target.closest('tr[data-id]'); if (r) go(`/clienti/${r.dataset.id}`); };
   $('#q').oninput = debounce(draw, 150);
   $('#new').onclick = () => customerModal();
   items = (await api('/api/admin/customers')).items; draw();
 }
-function customerForm(c, zs) {
+function customerForm(c, zs, agents = []) {
+  const admin = !isAgent();
   return html`
     <div class="field-row">
       <div class="field" style="grid-column:span 2"><label for="bn">Ragione sociale / insegna</label><input id="bn" name="business_name" value="${c.business_name || ''}" required></div>
@@ -805,10 +863,13 @@ function customerForm(c, zs) {
     </div>
     <div class="field"><label for="da">Indirizzo di consegna (se diverso)</label><input id="da" name="delivery_address" value="${c.delivery_address || ''}"></div>
     <div class="field"><label for="dn">Indicazioni per la consegna</label><input id="dn" name="delivery_notes" value="${c.delivery_notes || ''}" placeholder="es. dal retro, chiuso il lunedì"></div>
-    <div class="field-row">
+    ${admin ? html`<div class="field-row">
       <div class="field"><label for="ds">Sconto sul listino %</label><input id="ds" name="discount" inputmode="decimal" value="${c.discount ?? 0}"></div>
       <div class="field"><label for="mo">Ordine minimo € (vuoto = generale)</label><input id="mo" name="min_order" inputmode="decimal" value="${c.min_order != null ? centsToInput(c.min_order) : ''}"></div>
-      <div class="field"><label for="pt">Pagamento</label><input id="pt" name="payment_terms" value="${c.payment_terms || ''}" list="pts" placeholder="es. Bonifico 30 gg">
+      <div class="field"><label for="ag">Agente</label><select id="ag" name="agent_id"><option value="">Nessuno (diretto)</option>${agents.map(a => html`<option value="${a.id}" ${sel(a.id, c.agent_id)}>${a.name}${a.active ? '' : ' (disattivato)'}</option>`)}</select></div>
+    </div>` : html`<p class="hint">Sconto, listino e condizioni li imposta il fornitore.</p>`}
+    <div class="field-row">
+      <div class="field"><label for="pt">Pagamento${admin ? '' : ' richiesto'}</label><input id="pt" name="payment_terms" value="${c.payment_terms || ''}" list="pts" placeholder="es. Bonifico 30 gg">
         <datalist id="pts"><option>Contanti alla consegna</option><option>Bonifico anticipato</option><option>Bonifico 30 gg d.f.</option><option>RiBa 60 gg</option></datalist></div>
     </div>
     <details><summary class="small" style="cursor:pointer;margin-bottom:.75rem">Dati di fatturazione</summary>
@@ -817,19 +878,20 @@ function customerForm(c, zs) {
         <div class="field"><label for="sdi">Codice SDI</label><input id="sdi" name="sdi" value="${c.sdi || ''}" maxlength="7"></div>
         <div class="field"><label for="pec">PEC</label><input id="pec" name="pec" value="${c.pec || ''}"></div>
       </div></details>
-    <div class="field"><label for="nt">Note interne</label><textarea id="nt" name="notes">${c.notes || ''}</textarea></div>
+    ${admin ? html`<div class="field"><label for="nt">Note interne</label><textarea id="nt" name="notes">${c.notes || ''}</textarea></div>
     <label class="check"><input type="checkbox" name="blocked" ${chk(c.blocked)}> Blocca gli ordini online</label>
-    <div class="field"><label for="br">Messaggio mostrato al cliente se bloccato</label><input id="br" name="blocked_reason" value="${c.blocked_reason || ''}" placeholder="es. Saldo in sospeso, contattaci"></div>`;
+    <div class="field"><label for="br">Messaggio mostrato al cliente se bloccato</label><input id="br" name="blocked_reason" value="${c.blocked_reason || ''}" placeholder="es. Saldo in sospeso, contattaci"></div>` : ''}`;
 }
 function customerPayload(form) {
   const b = formData(form);
   b.discount = String(b.discount || 0).replace(',', '.');
-  b.min_order = b.min_order === '' ? null : toCents(b.min_order);
+  b.min_order = b.min_order === '' || b.min_order === undefined ? null : toCents(b.min_order);
   return b;
 }
+const agentsList = async () => (isAgent() ? [] : (await api('/api/admin/agents')).items);
 async function customerModal() {
-  const zs = await zones();
-  const m = modal(html`<h2>Nuovo cliente</h2><form id="cf2">${customerForm({}, zs)}
+  const [zs, ags] = await Promise.all([zones(), agentsList()]);
+  const m = modal(html`<h2>Nuovo cliente</h2><form id="cf2">${customerForm({}, zs, ags)}
     <div class="panel" style="background:var(--pith)">
       <label class="check"><input type="checkbox" name="create_login" checked> Crea l'accesso per ordinare online</label>
       <div class="field" style="margin:0"><label for="le">Email di accesso (se diversa da quella sopra)</label><input id="le" name="login_email" type="email"></div>
@@ -847,8 +909,10 @@ async function customerModal() {
     });
   };
 }
-function inviteModal(invite, phone, name) {
-  const msg = `Ciao! Da oggi puoi ordinare i prodotti di ${S.config.company_name} online, con i tuoi prezzi. Scegli la password da qui: ${invite.link}`;
+function inviteModal(invite, phone, name, kind = 'cliente') {
+  const msg = kind === 'agente'
+    ? `Ciao ${name || ''}! Ecco il tuo accesso agente per ${S.config.company_name}: vedi i tuoi clienti, inserisci ordini e controlli le provvigioni. Scegli la password da qui: ${invite.link}`
+    : `Ciao! Da oggi puoi ordinare i prodotti di ${S.config.company_name} online, con i tuoi prezzi. Scegli la password da qui: ${invite.link}`;
   const m = modal(html`<h2>Invito pronto</h2>
     <p>${invite.emailed ? 'Abbiamo inviato l\'email con il link.' : 'Manda il link al cliente: con questo sceglie la password.'} Il link vale 14 giorni.</p>
     <div class="linkbox"><input readonly value="${invite.link}" aria-label="Link di invito"><button class="btn" id="cp">Copia</button></div>
@@ -858,8 +922,9 @@ function inviteModal(invite, phone, name) {
 }
 async function viewCustomer({ id }) {
   loading('Cliente');
-  let d, zs, prods;
-  try { [d, zs, { items: prods }] = await Promise.all([api(`/api/admin/customers/${id}`), zones(), api('/api/admin/products')]); }
+  let d, zs, prods, ags;
+  const agent = isAgent();
+  try { [d, zs, { items: prods }, ags] = await Promise.all([api(`/api/admin/customers/${id}`), zones(), agent ? { items: [] } : api('/api/admin/products'), agentsList()]); }
   catch (e) { page('Cliente', '', html`<div class="empty"><h3>${e.message}</h3></div>`); return; }
   const c = d.customer;
   const priceMap = new Map(d.prices.map(p => [p.product_id, p.price]));
@@ -874,40 +939,40 @@ async function viewCustomer({ id }) {
       <div class="kpi ${d.stats.da_incassare ? 'alert' : ''}"><b class="num">${euro(d.stats.da_incassare)}</b><span>consegnato e non segnato pagato</span></div>
     </div>
     <div class="grid2" style="grid-template-columns:minmax(0,3fr) minmax(300px,2fr)">
-      <section class="panel"><h2>Anagrafica e condizioni</h2><form id="cf3">${customerForm(c, zs)}
-        <div class="actions"><button class="btn primary">Salva</button><button type="button" class="btn ghost" id="delc" style="color:var(--fig)">Elimina cliente</button></div></form></section>
+      <section class="panel"><h2>${agent ? 'Anagrafica' : 'Anagrafica e condizioni'}</h2><form id="cf3">${customerForm(c, zs, ags)}
+        <div class="actions"><button class="btn primary">Salva</button>${agent ? '' : html`<button type="button" class="btn ghost" id="delc" style="color:var(--fig)">Elimina cliente</button>`}</div></form></section>
       <div style="display:grid;gap:1.25rem;min-width:0">
         <section class="panel"><h2>Accessi all'app</h2>
           ${d.users.length ? html`<ul class="list-plain">${d.users.map(u => html`<li style="flex-wrap:wrap"><span><strong>${u.name || u.email}</strong><div class="muted small">${u.email}</div>
             <div class="small">${!u.active ? html`<span class="tag warn">disattivato</span>` : u.activated ? html`<span class="tag">attivo</span> <span class="muted">${u.last_login ? `ultimo accesso ${relDays(u.last_login)}` : ''}${u.push_devices ? ` · notifiche su ${u.push_devices} disp.` : ''}</span>` : html`<span class="tag warn">invito in attesa</span>`}</div></span>
             <span class="actions"><button class="btn small" data-inv="${u.id}">${u.activated ? 'Link nuova password' : 'Reinvia invito'}</button>
-            <button class="btn small ghost" data-act="${u.id}" data-on="${u.active ? 0 : 1}">${u.active ? 'Disattiva' : 'Riattiva'}</button></span></li>`)}</ul>`
+            ${agent ? '' : html`<button class="btn small ghost" data-act="${u.id}" data-on="${u.active ? 0 : 1}">${u.active ? 'Disattiva' : 'Riattiva'}</button>`}</span></li>`)}</ul>`
             : html`<p class="muted">Nessun accesso: il cliente può ordinare solo tramite voi.</p>`}
           <form id="nu" class="toolbar" style="margin-top:1rem"><input name="name" placeholder="Nome" style="flex:1;min-width:120px" aria-label="Nome"><input name="email" type="email" placeholder="Email" required style="flex:2;min-width:160px" aria-label="Email"><button class="btn">Aggiungi accesso</button></form>
         </section>
-        <section class="panel"><h2>Listino personalizzato</h2>
+        ${agent ? '' : html`<section class="panel"><h2>Listino personalizzato</h2>
           <p class="muted small">Prezzo base meno lo sconto del ${c.discount || 0}%. Scrivi un prezzo per fissarlo solo per questo cliente; lascia vuoto per usare quello calcolato.</p>
           <div style="max-height:480px;overflow:auto"><table class="items"><thead><tr><th>Prodotto</th><th class="num">Calcolato</th><th class="num">Prezzo fisso €</th></tr></thead>
           <tbody>${active.map(p => html`<tr><td>${p.name}<div class="muted small">${p.pack || ''}</div></td><td class="num">${euro(Math.round(p.price * (1 - (c.discount || 0) / 100)))}</td>
             <td class="num"><input style="width:90px" inputmode="decimal" data-cp="${p.id}" value="${centsToInput(priceMap.get(p.id))}" aria-label="Prezzo fisso ${p.name}"></td></tr>`)}</tbody></table></div>
           <button class="btn primary" id="savep" style="margin-top:1rem">Salva listino</button>
-        </section>
+        </section>`}
       </div>
     </div>`);
   $('#cf3').onsubmit = e => { e.preventDefault(); withBusy(e.submitter, async () => { await api(`/api/admin/customers/${c.id}`, { method: 'PUT', body: customerPayload(e.target) }); toast('Cliente salvato'); viewCustomer({ id }); }); };
-  $('#delc').onclick = async () => {
+  $('#delc')?.addEventListener('click', async () => {
     if (!(await confirmDialog({ title: `Eliminare ${c.business_name}?`, text: 'Possibile solo se non ha ordini. In alternativa bloccalo.', confirm: 'Elimina', danger: true }))) return;
     try { await api(`/api/admin/customers/${c.id}`, { method: 'DELETE' }); toast('Cliente eliminato'); go('/clienti'); } catch (e) { showError(e); }
-  };
+  });
   $('#nu').onsubmit = e => {
     e.preventDefault();
     withBusy(e.submitter, async () => { const r = await api(`/api/admin/customers/${c.id}/users`, { method: 'POST', body: formData(e.target) }); await viewCustomer({ id }); inviteModal(r.invite, c.phone, c.business_name); });
   };
-  $('#savep').onclick = e => withBusy(e.target, async () => {
+  $('#savep')?.addEventListener('click', e => withBusy(e.target, async () => {
     const prices = $$('[data-cp]').map(i => ({ product_id: Number(i.dataset.cp), price: i.value.trim() ? toCents(i.value) : '' }));
     const r = await api(`/api/admin/customers/${c.id}/prices`, { method: 'PUT', body: { prices } });
     toast(`Listino salvato · ${r.count} prezzi fissi`);
-  });
+  }));
   body.addEventListener('click', e => {
     const inv = e.target.closest('[data-inv]');
     if (inv) withBusy(inv, async () => { const r = await api(`/api/admin/users/${inv.dataset.inv}/invite`, { method: 'POST' }); inviteModal(r.invite, c.phone, c.business_name); });
@@ -967,37 +1032,285 @@ function zoneModal(z) {
 
 // ---------- comunicazioni ----------
 async function viewAnnouncements() {
-  const { items } = await api('/api/admin/announcements');
+  const agent = isAgent();
+  const [{ items }, { items: customers }, zs, ags] = await Promise.all([
+    api('/api/admin/announcements'), api('/api/admin/customers'), agent ? [] : zones(), agentsList(),
+  ]);
   const today = todayIso();
-  const body = page('Comunicazioni', '', html`
+  const targetLabel = a => ({ tutti: agent ? 'tutti i miei clienti' : 'tutti i clienti', zona: `zona ${a.zone_name || ''}`, agente: agent ? 'tutti i miei clienti' : `clienti di ${a.agent_name || ''}`, cliente: a.customer_name || 'un cliente' }[a.target]);
+  const body = page(agent ? 'Messaggi ai clienti' : 'Comunicazioni', '', html`
     <div class="grid2">
-      <section class="panel"><h2>Nuova comunicazione</h2>
-        <p class="muted small">Compare in cima al catalogo dei clienti. Con la notifica arriva anche sul telefono di chi l'ha attivata.</p>
+      <section class="panel"><h2>Nuovo messaggio</h2>
+        <p class="muted small">Compare in cima al catalogo dei clienti scelti. Con la notifica arriva anche sul loro telefono.</p>
         <form id="af">
-          <div class="field"><label for="at">Titolo</label><input id="at" name="title" required placeholder="es. Arrivato il cedro candito nuovo raccolto"></div>
+          <div class="field"><label for="tg">A chi</label>
+            <select id="tg" name="target">
+              ${agent ? html`<option value="agente">Tutti i miei clienti (${customers.length})</option><option value="cliente">Un cliente</option>`
+                : html`<option value="tutti">Tutti i clienti</option><option value="zona">I clienti di una zona</option>${ags.length ? html`<option value="agente">I clienti di un agente</option>` : ''}<option value="cliente">Un cliente</option>`}
+            </select></div>
+          <div class="field hidden" data-for="zona"><label for="tz">Zona</label><select id="tz" name="zone_id">${zs.map(z => html`<option value="${z.id}">${z.name}</option>`)}</select></div>
+          <div class="field hidden" data-for="agente-admin"><label for="ta">Agente</label><select id="ta" name="agent_id">${ags.map(a => html`<option value="${a.id}">${a.name}</option>`)}</select></div>
+          <div class="field hidden" data-for="cliente"><label for="tc">Cliente</label><select id="tc" name="customer_id">${customers.map(c => html`<option value="${c.id}">${c.business_name}${c.city ? ` — ${c.city}` : ''}</option>`)}</select></div>
+          <div class="field"><label for="at">Titolo</label><input id="at" name="title" required placeholder="${agent ? 'es. Passo da voi giovedì mattina' : 'es. Arrivato il cedro candito nuovo raccolto'}"></div>
           <div class="field"><label for="ab">Testo</label><textarea id="ab" name="body"></textarea></div>
           <div class="field-row">
             <div class="field"><label for="ak">Tipo</label><select id="ak" name="kind"><option value="info">Informazione</option><option value="promo">Promozione</option><option value="avviso">Avviso importante</option></select></div>
-            <div class="field"><label for="as">Dal</label><input id="as" type="date" name="starts_on" value="${today}"></div>
-            <div class="field"><label for="ae">Al</label><input id="ae" type="date" name="ends_on"></div>
+            <div class="field"><label for="as">Visibile dal</label><input id="as" type="date" name="starts_on" value="${today}"></div>
+            <div class="field"><label for="ae">al</label><input id="ae" type="date" name="ends_on"></div>
           </div>
-          <label class="check"><input type="checkbox" name="push" checked> Invia anche come notifica push a tutti i clienti</label>
+          <label class="check"><input type="checkbox" name="push" checked> Invia anche come notifica push</label>
           <button class="btn primary">Pubblica</button>
         </form></section>
-      <section class="panel"><h2>Pubblicate</h2>
+      <section class="panel"><h2>${agent ? 'I tuoi messaggi' : 'Pubblicate'}</h2>
         ${items.length ? html`<ul class="list-plain">${items.map(a => html`<li><span><strong>${a.title}</strong>
-          <div class="muted small">${a.starts_on ? `dal ${dayShort(a.starts_on)}` : ''}${a.ends_on ? ` al ${dayShort(a.ends_on)}` : ''}${a.pushed ? ' · notificata' : ''}${a.ends_on && a.ends_on < today ? ' · scaduta' : ''}</div></span>
-          <button class="btn small ghost" data-del="${a.id}">Elimina</button></li>`)}</ul>` : html`<p class="muted">Nessuna comunicazione. Usale per ferie, novità di stagione o offerte.</p>`}
+          <div class="muted small">a ${targetLabel(a)}${a.starts_on ? ` · dal ${dayShort(a.starts_on)}` : ''}${a.ends_on ? ` al ${dayShort(a.ends_on)}` : ''}${a.pushed ? ` · notificata a ${a.push_count}` : ''}${a.ends_on && a.ends_on < today ? ' · scaduta' : ''}${!agent && a.author && a.target !== 'tutti' ? ` · da ${a.author}` : ''}</div></span>
+          <button class="btn small ghost" data-del="${a.id}">Elimina</button></li>`)}</ul>` : html`<p class="muted">Nessun messaggio. Usali per ferie, novità di stagione, offerte o per avvisare dei tuoi passaggi.</p>`}
       </section>
     </div>`);
+  const syncTarget = () => {
+    const t = $('#tg').value;
+    $$('[data-for]').forEach(el => el.classList.toggle('hidden', !(el.dataset.for === t || (el.dataset.for === 'agente-admin' && t === 'agente' && !agent))));
+  };
+  $('#tg').onchange = syncTarget; syncTarget();
   $('#af').onsubmit = e => {
     e.preventDefault();
-    withBusy(e.submitter, async () => { await api('/api/admin/announcements', { method: 'POST', body: formData(e.target) }); toast('Comunicazione pubblicata'); viewAnnouncements(); });
+    withBusy(e.submitter, async () => {
+      const b = formData(e.target);
+      const r = await api('/api/admin/announcements', { method: 'POST', body: b });
+      toast(b.push ? `Pubblicato, notificato a ${r.recipients} ${r.recipients === 1 ? 'accesso' : 'accessi'}` : 'Pubblicato');
+      viewAnnouncements();
+    });
   };
   body.onclick = async e => {
     const d = e.target.closest('[data-del]'); if (!d) return;
-    if (await confirmDialog({ title: 'Eliminare la comunicazione?', confirm: 'Elimina', danger: true })) { await api(`/api/admin/announcements/${d.dataset.del}`, { method: 'DELETE' }); viewAnnouncements(); }
+    if (await confirmDialog({ title: 'Eliminare il messaggio?', text: 'Sparisce dal catalogo dei clienti. Le notifiche già inviate restano.', confirm: 'Elimina', danger: true })) { await api(`/api/admin/announcements/${d.dataset.del}`, { method: 'DELETE' }); viewAnnouncements(); }
   };
+}
+
+// ---------- promozioni ----------
+async function viewPromotions() {
+  const agent = isAgent();
+  const { items, today } = await api('/api/admin/promotions');
+  const state = pr => !pr.active ? ['sospesa', 'warn'] : pr.ends_on < today ? ['finita', 'warn'] : pr.starts_on > today ? ['programmata', ''] : ['attiva', 'promo'];
+  const visible = agent ? items.filter(pr => pr.active && pr.ends_on >= today) : items;
+  const body = page(agent ? 'Offerte in corso' : 'Promozioni', agent ? '' : html`<button class="btn primary" id="new">Nuova promozione</button>`, html`
+    <p class="muted">${agent ? 'Le offerte valide per i tuoi clienti: usale quando li senti o li visiti.' : 'Prezzo speciale o sconto su un prodotto per un periodo, per tutti o per una zona. Nel catalogo compare il badge "Offerta" e il prezzo pieno barrato. Vale anche per gli ordini inseriti da voi e dagli agenti.'}</p>
+    <div class="table-wrap"><table class="table"><thead><tr><th>Prodotto</th><th>Offerta</th><th class="num">Prezzo</th><th>Periodo</th><th>Per</th><th class="num">Venduti</th>${agent ? '' : html`<th>Stato</th><th></th>`}</tr></thead><tbody>
+    ${visible.length ? visible.map(pr => { const [lbl, cls] = state(pr); return html`<tr>
+      <td><strong>${pr.product_name}</strong><div class="muted small">${pr.pack || ''}</div></td>
+      <td>${pr.title || '—'}${pr.description ? html`<div class="muted small">${pr.description}</div>` : ''}</td>
+      <td class="num"><strong>${euro(pr.promo_price)}</strong><div class="muted small"><s>${euro(pr.list_price)}</s> ${pr.kind === 'sconto' ? `-${qty(pr.value)}%` : ''}</div></td>
+      <td class="small">${dayShort(pr.starts_on)} → ${dayShort(pr.ends_on)}</td>
+      <td class="small">${pr.zone_name || 'Tutti'}</td>
+      <td class="num">${qty(pr.qty_sold)} ${pr.unit}</td>
+      ${agent ? '' : html`<td><span class="tag ${cls}">${lbl}</span></td><td><button class="btn small" data-edit="${pr.id}">Modifica</button></td>`}</tr>`; })
+      : html`<tr><td colspan="8"><div class="empty"><h3>${agent ? 'Nessuna offerta in corso' : 'Nessuna promozione'}</h3><p>${agent ? 'Quando il fornitore ne crea una la trovi qui e ti arriva anche sul catalogo dei clienti.' : 'Crea la prima: ad esempio il liquore di cedro a prezzo speciale per l\'estate.'}</p></div></td></tr>`}
+    </tbody></table></div>`);
+  if (agent) return;
+  $('#new').onclick = () => promoModal(null);
+  body.onclick = e => { const b = e.target.closest('[data-edit]'); if (b) promoModal(items.find(p => p.id === Number(b.dataset.edit))); };
+}
+async function promoModal(pr) {
+  const [{ items: prods }, zs] = await Promise.all([api('/api/admin/products'), zones()]);
+  const isNew = !pr;
+  const today = todayIso();
+  pr = pr || { kind: 'sconto', starts_on: today, ends_on: addDays(today, 30), active: 1 };
+  const m = modal(html`<h2>${isNew ? 'Nuova promozione' : 'Modifica promozione'}</h2><form id="prf">
+    <div class="field"><label for="pp">Prodotto</label><select id="pp" name="product_id" required><option value="">Scegli…</option>${prods.filter(p => !p.archived).map(p => html`<option value="${p.id}" data-price="${p.price}" ${sel(p.id, pr.product_id)}>${p.name}${p.pack ? ` · ${p.pack}` : ''} — ${euro(p.price)}</option>`)}</select></div>
+    <div class="field-row">
+      <div class="field"><label for="pk">Tipo</label><select id="pk" name="kind"><option value="sconto" ${sel('sconto', pr.kind)}>Sconto %</option><option value="prezzo" ${sel('prezzo', pr.kind)}>Prezzo speciale €</option></select></div>
+      <div class="field"><label for="pv">Valore</label><input id="pv" name="value" inputmode="decimal" required value="${pr.kind === 'prezzo' ? centsToInput(pr.value) : (pr.value ?? '')}"></div>
+      <div class="field"><label>Prezzo in offerta</label><p id="pprev" class="pick-total" style="margin:.35rem 0 0">—</p></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label for="ps">Dal</label><input id="ps" type="date" name="starts_on" value="${pr.starts_on}" required></div>
+      <div class="field"><label for="pe">Al</label><input id="pe" type="date" name="ends_on" value="${pr.ends_on}" required></div>
+      <div class="field"><label for="pz">Per</label><select id="pz" name="zone_id"><option value="">Tutti i clienti</option>${zs.map(z => html`<option value="${z.id}" ${sel(z.id, pr.zone_id)}>Zona ${z.name}</option>`)}</select></div>
+    </div>
+    <div class="field"><label for="pt">Titolo (facoltativo)</label><input id="pt" name="title" value="${pr.title || ''}" placeholder="es. Offerta d'estate sul liquore di cedro"></div>
+    <div class="field"><label for="pd">Descrizione (facoltativa)</label><input id="pd" name="description" value="${pr.description || ''}" placeholder="es. Fino a esaurimento scorte"></div>
+    <label class="check"><input type="checkbox" name="active" ${chk(pr.active)}> Attiva</label>
+    <label class="check"><input type="checkbox" name="push" ${chk(isNew)}> Avvisa i clienti con una notifica push${pr.pushed ? ' (già inviata una volta)' : ''}</label>
+    <p class="hint">I clienti scontati a listino pagano comunque il prezzo più basso tra il loro e quello in offerta.</p>
+    <div class="modal-actions">${!isNew ? html`<button type="button" class="btn ghost" id="del" style="margin-right:auto;color:var(--fig)">Elimina</button>` : ''}
+      <button type="button" class="btn ghost" data-close>Annulla</button><button class="btn primary">${isNew ? 'Crea promozione' : 'Salva'}</button></div></form>`, { wide: true });
+  const f = m.el.querySelector('form');
+  const preview = () => {
+    const o = f.product_id.selectedOptions[0];
+    const list = Number(o?.dataset.price || 0);
+    const v = f.kind.value === 'prezzo' ? toCents(f.value.value) : Number(String(f.value.value).replace(',', '.'));
+    const price = !list || !v ? null : f.kind.value === 'prezzo' ? v : Math.round(list * (1 - v / 100));
+    m.el.querySelector('#pprev').textContent = price ? `${euro(price)} invece di ${euro(list)}` : '—';
+  };
+  f.oninput = preview; f.onchange = preview; preview();
+  f.onsubmit = e => {
+    e.preventDefault();
+    withBusy(e.submitter, async () => {
+      const b = formData(f);
+      b.value = b.kind === 'prezzo' ? toCents(b.value) : String(b.value).replace(',', '.');
+      const r = await api(isNew ? '/api/admin/promotions' : `/api/admin/promotions/${pr.id}`, { method: isNew ? 'POST' : 'PUT', body: b });
+      toast(b.push ? `Promozione salvata, avvisati ${r.recipients} accessi` : 'Promozione salvata');
+      m.close(); viewPromotions();
+    });
+  };
+  m.el.querySelector('#del')?.addEventListener('click', async () => {
+    if (!(await confirmDialog({ title: 'Eliminare la promozione?', text: 'Gli ordini già fatti mantengono il prezzo in offerta.', confirm: 'Elimina', danger: true }))) return;
+    await api(`/api/admin/promotions/${pr.id}`, { method: 'DELETE' }); m.close(); viewPromotions();
+  });
+}
+
+// ---------- agenti ----------
+async function viewAgents() {
+  const { items } = await api('/api/admin/agents');
+  const body = page('Agenti', html`<button class="btn primary" id="new">Nuovo agente</button>`, html`
+    <p class="muted">Ogni agente entra con la sua email, vede solo i suoi clienti, inserisce ordini per loro e riceve la notifica quando ordinano.</p>
+    <div class="table-wrap"><table class="table"><thead><tr><th>Agente</th><th class="num">Clienti</th><th class="num">Provvigione</th><th class="num">Imponibile mese</th><th class="num">Provvigioni mese</th><th>Accesso</th><th></th></tr></thead><tbody>
+    ${items.length ? items.map(a => html`<tr>
+      <td><strong>${a.name}</strong>${a.active ? '' : html` <span class="tag warn">disattivato</span>`}<div class="muted small">${[a.email, a.phone].filter(Boolean).join(' · ')}</div></td>
+      <td class="num"><a href="#/clienti">${a.customers}</a></td><td class="num">${qty(a.commission)}%</td>
+      <td class="num">${euro(a.month_revenue)}</td><td class="num"><a href="#/provvigioni?agent_id=${a.id}">${euro(a.month_commission)}</a></td>
+      <td class="small">${a.activated ? html`<span class="tag">attivo</span> <span class="muted">${a.last_login ? relDays(a.last_login) : ''}${a.push_devices ? ' · notifiche ok' : ''}</span>` : html`<span class="tag warn">invito in attesa</span>`}</td>
+      <td><span class="actions"><button class="btn small" data-edit="${a.id}">Modifica</button><a class="btn small ghost" href="#/ordini?agent_id=${a.id}&status=">Ordini</a></span></td></tr>`)
+      : html`<tr><td colspan="7"><div class="empty"><h3>Nessun agente</h3><p>Aggiungi i tuoi agenti di commercio e assegna loro i clienti che seguono.</p></div></td></tr>`}
+    </tbody></table></div>`);
+  $('#new').onclick = () => agentModal(null);
+  body.onclick = e => { const b = e.target.closest('[data-edit]'); if (b) agentModal(items.find(a => a.id === Number(b.dataset.edit))); };
+}
+async function agentModal(a) {
+  const { items: customers } = await api('/api/admin/customers');
+  const isNew = !a;
+  a = a || { commission: 0, active: 1 };
+  const m = modal(html`<h2>${isNew ? 'Nuovo agente' : a.name}</h2><form id="agf">
+    <div class="field-row">
+      <div class="field"><label for="an">Nome e cognome</label><input id="an" name="name" value="${a.name || ''}" required></div>
+      <div class="field"><label for="ap">Telefono</label><input id="ap" name="phone" type="tel" value="${a.phone || ''}"></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label for="ae">Email di accesso</label><input id="ae" name="email" type="email" value="${a.email || ''}" ${isNew ? raw('required') : raw('disabled')}></div>
+      <div class="field"><label for="ac">Provvigione % sull'imponibile</label><input id="ac" name="commission" inputmode="decimal" value="${qty(a.commission)}"></div>
+    </div>
+    <div class="field"><span class="small muted" style="display:block;margin-bottom:.3rem">Clienti seguiti</span>
+      <input type="search" id="cs" placeholder="Filtra clienti" aria-label="Filtra clienti" style="margin-bottom:.5rem">
+      <div style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:var(--r-s);padding:.6rem .75rem">
+      ${customers.length ? customers.map(c => html`<label class="check" data-name="${c.business_name.toLowerCase()}"><input type="checkbox" name="customer_ids" value="${c.id}" data-multi ${chk(a.id && c.agent_id === a.id)}> ${c.business_name}${c.city ? html` <span class="muted small">${c.city}</span>` : ''}${c.agent_id && c.agent_id !== a.id ? html` <span class="tag">ora: ${c.agent_name}</span>` : ''}</label>`) : html`<p class="muted small">Nessun cliente ancora.</p>`}
+      </div></div>
+    ${!isNew ? html`<label class="check"><input type="checkbox" name="active" ${chk(a.active)}> Accesso attivo</label>` : ''}
+    <p class="hint">La provvigione viene fissata su ogni ordine al momento dell'ordine: se la cambi vale per i prossimi.</p>
+    <div class="modal-actions">
+      ${!isNew ? html`<button type="button" class="btn ghost" id="inv" style="margin-right:auto">${a.activated ? 'Link nuova password' : 'Reinvia invito'}</button>` : ''}
+      ${!isNew ? html`<button type="button" class="btn ghost" id="del" style="color:var(--fig)">Elimina</button>` : ''}
+      <button type="button" class="btn ghost" data-close>Annulla</button><button class="btn primary">${isNew ? 'Crea e invita' : 'Salva'}</button></div></form>`, { wide: true });
+  const f = m.el.querySelector('form');
+  m.el.querySelector('#cs').oninput = e => { const q = e.target.value.toLowerCase(); $$('[data-name]', m.el).forEach(l => l.classList.toggle('hidden', !l.dataset.name.includes(q))); };
+  f.onsubmit = e => {
+    e.preventDefault();
+    withBusy(e.submitter, async () => {
+      const b = formData(f);
+      b.commission = String(b.commission || 0).replace(',', '.');
+      b.customer_ids = (b.customer_ids || []).map(Number);
+      if (isNew) {
+        const r = await api('/api/admin/agents', { method: 'POST', body: b });
+        m.close(); await viewAgents(); inviteModal(r.invite, b.phone, b.name, 'agente');
+      } else {
+        await api(`/api/admin/agents/${a.id}`, { method: 'PUT', body: b });
+        toast('Agente salvato'); m.close(); viewAgents();
+      }
+    });
+  };
+  m.el.querySelector('#inv')?.addEventListener('click', e => withBusy(e.target, async () => { const r = await api(`/api/admin/users/${a.id}/invite`, { method: 'POST' }); inviteModal(r.invite, a.phone, a.name, 'agente'); }));
+  m.el.querySelector('#del')?.addEventListener('click', async () => {
+    if (!(await confirmDialog({ title: `Eliminare ${a.name}?`, text: 'I suoi clienti tornano diretti. Se ha già ordini con provvigioni, disattivalo invece.', confirm: 'Elimina', danger: true }))) return;
+    try { await api(`/api/admin/agents/${a.id}`, { method: 'DELETE' }); toast('Agente eliminato'); m.close(); viewAgents(); } catch (err) { showError(err); }
+  });
+}
+
+// ---------- provvigioni ----------
+async function viewCommissions() {
+  const agent = isAgent();
+  const p = hashParams();
+  const today = todayIso();
+  const st = { from: p.get('from') || today.slice(0, 8) + '01', to: p.get('to') || today, agent_id: p.get('agent_id') || '', delivered: false };
+  const ags = await agentsList();
+  const body = page(agent ? 'Le mie provvigioni' : 'Provvigioni', html`<button class="btn" id="exp">Esporta CSV</button>`, html`
+    <div class="toolbar">
+      <label class="sr" for="cf">Dal</label><input type="date" id="cf" value="${st.from}">
+      <label class="sr" for="ct">Al</label><input type="date" id="ct" value="${st.to}">
+      <div class="seg"><button data-per="mese" aria-pressed="true">Questo mese</button><button data-per="prec">Mese scorso</button><button data-per="anno">Anno</button></div>
+      ${ags.length ? html`<select id="ca" aria-label="Agente"><option value="">Tutti gli agenti</option>${ags.map(a => html`<option value="${a.id}" ${sel(a.id, st.agent_id)}>${a.name}</option>`)}</select>` : ''}
+      <label class="check" style="margin:0"><input type="checkbox" id="cd"> Solo consegnati</label>
+    </div>
+    <div id="res"><div class="loading">Caricamento…</div></div>`);
+  let data;
+  const load = async () => {
+    const qs = new URLSearchParams({ from: st.from, to: st.to });
+    if (st.agent_id) qs.set('agent_id', st.agent_id);
+    if (st.delivered) qs.set('delivered', '1');
+    data = await api(`/api/admin/commissions?${qs}`);
+    const tot = data.agents.reduce((a, x) => ({ imp: a.imp + x.imponibile, prov: a.prov + x.provvigione, n: a.n + x.orders }), { imp: 0, prov: 0, n: 0 });
+    mount($('#res'), html`
+      <div class="kpis"><div class="kpi"><b>${tot.n}</b><span>ordini</span></div><div class="kpi"><b class="num">${euro(tot.imp)}</b><span>imponibile</span></div>
+        <div class="kpi alert"><b class="num">${euro(tot.prov)}</b><span>provvigioni</span></div></div>
+      ${!agent && data.agents.length > 1 ? html`<div class="table-wrap" style="margin-bottom:1.25rem"><table class="table"><thead><tr><th>Agente</th><th class="num">Ordini</th><th class="num">Imponibile</th><th class="num">Provvigione</th></tr></thead><tbody>
+        ${data.agents.map(a => html`<tr><td><strong>${a.agent_name}</strong></td><td class="num">${a.orders}</td><td class="num">${euro(a.imponibile)}</td><td class="num"><strong>${euro(a.provvigione)}</strong></td></tr>`)}</tbody></table></div>` : ''}
+      <div class="table-wrap"><table class="table"><thead><tr><th>Ordine</th>${agent ? '' : html`<th>Agente</th>`}<th>Cliente</th><th>Stato</th><th class="num">Imponibile</th><th class="num">%</th><th class="num">Provvigione</th></tr></thead><tbody>
+        ${data.orders.length ? data.orders.map(o => html`<tr class="click" data-id="${o.id}"><td><strong>${o.number}</strong><div class="muted small">${dateTime(o.created_at)}</div></td>${agent ? '' : html`<td>${o.agent_name}</td>`}
+          <td>${o.business_name}</td><td>${statusPill(o.status)}${o.paid ? html` <span class="tag">pagato</span>` : ''}</td><td class="num">${euro(o.subtotal)}</td><td class="num">${qty(o.commission_rate)}</td><td class="num"><strong>${euro(o.commission)}</strong></td></tr>`)
+          : html`<tr><td colspan="7"><div class="empty"><h3>Nessun ordine nel periodo</h3><p>Le provvigioni maturano sugli ordini dei clienti assegnati, esclusi quelli annullati.</p></div></td></tr>`}
+      </tbody></table></div>`);
+  };
+  const reload = () => load().catch(showError);
+  body.onclick = e => {
+    const per = e.target.closest('[data-per]');
+    if (per) {
+      $$('[data-per]').forEach(b => b.setAttribute('aria-pressed', b === per));
+      const m0 = today.slice(0, 8) + '01';
+      if (per.dataset.per === 'mese') { st.from = m0; st.to = today; }
+      if (per.dataset.per === 'prec') { const d = addDays(m0, -1); st.from = d.slice(0, 8) + '01'; st.to = d; }
+      if (per.dataset.per === 'anno') { st.from = today.slice(0, 5) + '01-01'; st.to = today; }
+      $('#cf').value = st.from; $('#ct').value = st.to; reload(); return;
+    }
+    const r = e.target.closest('tr[data-id]'); if (r) go(`/ordini/${r.dataset.id}`);
+  };
+  body.onchange = e => {
+    if (e.target.id === 'cf') st.from = e.target.value;
+    if (e.target.id === 'ct') st.to = e.target.value;
+    if (e.target.id === 'ca') st.agent_id = e.target.value;
+    if (e.target.id === 'cd') st.delivered = e.target.checked;
+    reload();
+  };
+  $('#exp').onclick = () => {
+    const c2 = v => (v / 100).toFixed(2).replace('.', ',');
+    const cell = v => { const s = String(v ?? ''); return /[;"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const rows = [['Ordine', 'Data', 'Agente', 'Cliente', 'Stato', 'Imponibile', 'Provvigione %', 'Provvigione'],
+      ...data.orders.map(o => [o.number, o.created_at.slice(0, 10), o.agent_name, o.business_name, STATUS_LABEL[o.status], c2(o.subtotal), String(o.commission_rate).replace('.', ','), c2(o.commission)])];
+    const blob = new Blob(['﻿' + rows.map(r => r.map(cell).join(';')).join('\r\n')], { type: 'text/csv' });
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `provvigioni_${st.from}_${st.to}.csv` });
+    a.click(); URL.revokeObjectURL(a.href);
+  };
+  reload();
+}
+
+// ---------- account agente ----------
+async function viewAccount() {
+  const pst = await pushState(S.config.vapid_public_key).catch(() => 'unsupported');
+  page('Account', '', html`<div class="grid2">
+    <section class="panel"><h2>Notifiche</h2>
+      ${pst === 'on' ? html`<p>Attive: ricevi qui gli ordini dei tuoi clienti.</p><div class="actions"><button class="btn small" id="ptest">Invia una prova</button><button class="btn small ghost" id="poff">Disattiva</button></div>`
+        : pst === 'off' ? html`<p class="muted">Ricevi un avviso quando un tuo cliente ordina.</p><button class="btn primary" id="pon">Attiva le notifiche</button>` : html`<p class="muted">${pushHelp(pst)}</p>`}
+    </section>
+    <section class="panel"><h2>Password</h2><form id="pw">
+      <input type="email" value="${S.me.email}" autocomplete="username" hidden>
+      <div class="field"><label for="op">Attuale</label><input id="op" name="old" type="password" autocomplete="current-password" required></div>
+      <div class="field"><label for="np">Nuova</label><input id="np" name="password" type="password" minlength="8" autocomplete="new-password" required></div>
+      <button class="btn">Cambia password</button></form></section>
+    <section class="panel"><h2>${S.config.company_name}</h2>
+      <div class="actions"><a class="btn" href="tel:${S.config.company_phone}">${icon('phone')} Chiama</a><a class="btn" href="${waLink(S.config.company_phone)}" target="_blank" rel="noopener">${icon('wa')} WhatsApp</a></div>
+      <p class="small muted" style="margin-top:1rem">Collegato come ${S.me.email}</p></section>
+  </div>`);
+  $('#pon')?.addEventListener('click', e => withBusy(e.target, async () => { await enablePush(S.config.vapid_public_key); toast('Notifiche attivate'); pushBanner(); viewAccount(); }));
+  $('#poff')?.addEventListener('click', e => withBusy(e.target, async () => { await disablePush(); toast('Notifiche disattivate'); viewAccount(); }));
+  $('#ptest')?.addEventListener('click', e => withBusy(e.target, async () => { await api('/api/push/test', { method: 'POST' }); toast('Notifica di prova inviata'); }));
+  $('#pw').onsubmit = e => { e.preventDefault(); withBusy(e.submitter, async () => { await api('/api/auth/change-password', { method: 'POST', body: formData(e.target) }); e.target.reset(); toast('Password cambiata'); }); };
 }
 
 // ---------- impostazioni ----------

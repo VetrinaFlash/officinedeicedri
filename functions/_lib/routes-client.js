@@ -20,7 +20,9 @@ export const clientRoutes = [
       catalogFor(env, customer),
       env.DB.prepare('SELECT id, name FROM categories ORDER BY sort, name').all(),
       env.DB.prepare(`SELECT id, title, body, kind FROM announcements
-        WHERE (starts_on IS NULL OR starts_on <= ?) AND (ends_on IS NULL OR ends_on >= ?) ORDER BY id DESC LIMIT 5`).bind(today, today).all(),
+        WHERE (starts_on IS NULL OR starts_on <= ?1) AND (ends_on IS NULL OR ends_on >= ?1)
+          AND (target = 'tutti' OR (target = 'zona' AND zone_id = ?2) OR (target = 'agente' AND agent_id = ?3) OR (target = 'cliente' AND customer_id = ?4))
+        ORDER BY id DESC LIMIT 5`).bind(today, customer.zone_id ?? -1, customer.agent_id ?? -1, customer.id).all(),
       env.DB.prepare(`SELECT id FROM orders WHERE customer_id = ? AND status != 'annullato' ORDER BY created_at DESC LIMIT 1`).bind(customer.id).first(),
     ]);
     // prodotti ordinati più spesso dal cliente (per "I tuoi soliti")
@@ -61,7 +63,7 @@ export const clientRoutes = [
       customer, by: user, items: b.items, delivery_date: b.delivery_date, notes: str(b.notes, 1000), source: 'app',
     });
     const settings = await getSettings(env);
-    const work = notifyNewOrder(env, request, order, settings);
+    const work = notifyNewOrder(env, request, order, settings, user);
     return { response: json({ order }), waitUntil: work };
   }],
 
@@ -92,7 +94,7 @@ export const clientRoutes = [
       ...order.items.filter(i => i.product_id).map(i =>
         env.DB.prepare('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL').bind(i.qty, i.product_id)),
     ]);
-    const work = notifyUsers(env, await adminIds(env), {
+    const work = notifyUsers(env, [...await adminIds(env), order.customer_agent_id].filter(Boolean), {
       title: `Ordine annullato da ${order.business_name}`, body: `${order.number} è stato annullato dal cliente.`, url: `/admin/#/ordini/${order.id}`,
     });
     return { response: json({ ok: true }), waitUntil: work };
@@ -102,7 +104,9 @@ export const clientRoutes = [
     const c = await loadCustomer(env, user);
     const { results: users } = await env.DB.prepare('SELECT id, name, email FROM users WHERE customer_id = ? AND active = 1').bind(c.id).all();
     const s = await getSettings(env);
+    const agent = c.agent_id ? await env.DB.prepare("SELECT name, phone, email FROM users WHERE id = ? AND active = 1").bind(c.agent_id).first() : null;
     return json({
+      agent,
       customer: {
         business_name: c.business_name, vat: c.vat, tax_code: c.tax_code, sdi: c.sdi, pec: c.pec, contact_name: c.contact_name,
         phone: c.phone, email: c.email, address: c.address, city: c.city, province: c.province, zip: c.zip,

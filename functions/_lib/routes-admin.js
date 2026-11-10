@@ -3,7 +3,7 @@ import {
 } from './util.js';
 import {
   getSettings, getOrder, createOrder, notifyNewOrder, notifyStatus, notifyUsers, zoneFor, computeTotals,
-  createUserToken, appUrl, adminCatalogFor, orderNumber, deliveryOptions, effectivePrice,
+  createUserToken, appUrl, adminCatalogFor, orderNumber, deliveryOptions, customerUserIds, promoPrice, adminIds,
 } from './core.js';
 import { sendEmail, emailLayout } from './email.js';
 
@@ -19,7 +19,16 @@ function customerFields(b) {
     zone_id: b.zone_id ? int(b.zone_id) : null, discount: Math.min(100, Math.max(0, num(b.discount))),
     payment_terms: str(b.payment_terms, 120), min_order: b.min_order === '' || b.min_order === null || b.min_order === undefined ? null : int(b.min_order),
     blocked: b.blocked ? 1 : 0, blocked_reason: str(b.blocked_reason, 250), notes: str(b.notes, 2000),
+    agent_id: b.agent_id ? int(b.agent_id) : null,
   };
+}
+/** L'agente può inserire solo anagrafica: condizioni commerciali le decide il fornitore. */
+function agentCustomerFields(b, user, existing) {
+  const f = customerFields(b);
+  f.agent_id = user.id;
+  for (const k of ['discount', 'min_order', 'blocked', 'blocked_reason', 'payment_terms', 'notes']) f[k] = existing ? existing[k] : customerFields({})[k];
+  if (!existing) f.payment_terms = str(b.payment_terms, 120);
+  return f;
 }
 function productFields(b) {
   return {
@@ -33,17 +42,34 @@ function productFields(b) {
   };
 }
 const upd = (fields) => Object.keys(fields).map(k => `${k} = ?`).join(', ');
+const isAgent = user => user?.role === 'agente';
+/** Filtro SQL sui clienti visibili: l'agente vede solo i suoi. */
+const scope = (user, alias = 'c') => isAgent(user) ? [` AND ${alias}.agent_id = ${Number(user.id)}`] : [''];
+async function customerFor(env, user, id) {
+  const c = await env.DB.prepare('SELECT * FROM customers WHERE id = ?').bind(int(id)).first();
+  if (!c || (isAgent(user) && c.agent_id !== user.id)) fail(404, 'Cliente non trovato.');
+  return c;
+}
+async function orderFor(env, user, id) {
+  const o = await getOrder(env, id);
+  if (!o || (isAgent(user) && o.customer_agent_id !== user.id)) fail(404, 'Ordine non trovato.');
+  return o;
+}
+const onlyAdmin = user => { if (isAgent(user)) fail(403, 'Operazione riservata al fornitore.'); };
 
 async function sendInvite(env, request, user, settings) {
   const token = await createUserToken(env, user.id, 'invite', 14);
   const link = `${appUrl(env, request)}/#/password/${token}`;
+  const agent = user.role === 'agente';
   const emailed = await sendEmail(env, {
     to: user.email,
-    subject: `Il tuo accesso per ordinare da ${settings.company_name}`,
+    subject: agent ? `Il tuo accesso agente · ${settings.company_name}` : `Il tuo accesso per ordinare da ${settings.company_name}`,
     html: emailLayout({
       company: settings.company_name,
-      title: 'Puoi ordinare online',
-      intro: `Ciao${user.name ? ' ' + user.name : ''}, ${settings.company_name} ti ha creato un accesso per ordinare i prodotti con i tuoi prezzi riservati. Scegli una password per entrare. Il link vale 14 giorni.`,
+      title: agent ? 'Il tuo accesso agente' : 'Puoi ordinare online',
+      intro: agent
+        ? `Ciao${user.name ? ' ' + user.name : ''}, da qui segui i tuoi clienti, inserisci ordini e vedi le provvigioni. Scegli una password per entrare. Il link vale 14 giorni.`
+        : `Ciao${user.name ? ' ' + user.name : ''}, ${settings.company_name} ti ha creato un accesso per ordinare i prodotti con i tuoi prezzi riservati. Scegli una password per entrare. Il link vale 14 giorni.`,
       button: { url: link, label: 'Scegli la password' },
       footer: `Per domande: ${settings.company_phone || ''} ${settings.company_email || ''}`,
     }),
@@ -58,50 +84,56 @@ async function restockDelta(env, items, sign) {
 
 export const adminRoutes = [
   // ---------- dashboard ----------
-  ['GET', '/api/admin/dashboard', async ({ env }) => {
+  ['GET', '/api/admin/dashboard', async ({ env, user }) => {
     const today = nowRome().date;
     const tomorrow = addDays(today, 1);
     const monthStart = today.slice(0, 8) + '01';
     const from30 = addDays(today, -29);
+    const [sc] = scope(user);
     const q = (sql, ...a) => env.DB.prepare(sql).bind(...a);
-    const [counts, month, prevMonth, byDay, topProducts, topCustomers, dormant, lowStock, recent] = await Promise.all([
+    const J = 'FROM orders o JOIN customers c ON c.id = o.customer_id';
+    const [counts, month, prevMonth, byDay, topProducts, topCustomers, dormant, lowStock, recent, promos] = await Promise.all([
       q(`SELECT
-          SUM(status = 'nuovo') AS nuovi,
-          SUM(delivery_date = ? AND status NOT IN ('annullato')) AS oggi,
-          SUM(delivery_date = ? AND status NOT IN ('annullato')) AS domani,
-          SUM(status IN ('confermato','in_preparazione')) AS da_evadere
-        FROM orders`, today, tomorrow).first(),
-      q(`SELECT COALESCE(SUM(subtotal),0) AS imponibile, COUNT(*) AS ordini, COUNT(DISTINCT customer_id) AS clienti
-         FROM orders WHERE status != 'annullato' AND date(created_at) >= ?`, monthStart).first(),
-      q(`SELECT COALESCE(SUM(subtotal),0) AS imponibile FROM orders WHERE status != 'annullato'
-         AND date(created_at) >= date(?, '-1 month') AND date(created_at) < ?`, monthStart, monthStart).first(),
-      q(`SELECT date(created_at) AS d, SUM(subtotal) AS imponibile, COUNT(*) AS ordini FROM orders
-         WHERE status != 'annullato' AND date(created_at) >= ? GROUP BY d ORDER BY d`, from30).all(),
+          COALESCE(SUM(o.status = 'nuovo'), 0) AS nuovi,
+          COALESCE(SUM(o.delivery_date = ? AND o.status != 'annullato'), 0) AS oggi,
+          COALESCE(SUM(o.delivery_date = ? AND o.status != 'annullato'), 0) AS domani,
+          COALESCE(SUM(o.status IN ('confermato','in_preparazione')), 0) AS da_evadere
+        ${J} WHERE 1 = 1 ${sc}`, today, tomorrow).first(),
+      q(`SELECT COALESCE(SUM(o.subtotal),0) AS imponibile, COUNT(*) AS ordini, COUNT(DISTINCT o.customer_id) AS clienti,
+          COALESCE(SUM(ROUND(o.subtotal * o.commission_rate / 100)), 0) AS provvigioni
+         ${J} WHERE o.status != 'annullato' AND date(o.created_at) >= ? ${sc}`, monthStart).first(),
+      q(`SELECT COALESCE(SUM(o.subtotal),0) AS imponibile ${J} WHERE o.status != 'annullato'
+         AND date(o.created_at) >= date(?, '-1 month') AND date(o.created_at) < ? ${sc}`, monthStart, monthStart).first(),
+      q(`SELECT date(o.created_at) AS d, SUM(o.subtotal) AS imponibile, COUNT(*) AS ordini ${J}
+         WHERE o.status != 'annullato' AND date(o.created_at) >= ? ${sc} GROUP BY d ORDER BY d`, from30).all(),
       q(`SELECT i.name, i.pack, i.unit, SUM(i.qty) AS qty, SUM(i.line_total) AS imponibile FROM order_items i
-         JOIN orders o ON o.id = i.order_id WHERE o.status != 'annullato' AND date(o.created_at) >= ?
+         JOIN orders o ON o.id = i.order_id JOIN customers c ON c.id = o.customer_id
+         WHERE o.status != 'annullato' AND date(o.created_at) >= ? ${sc}
          GROUP BY i.product_id, i.name ORDER BY imponibile DESC LIMIT 8`, from30).all(),
-      q(`SELECT c.id, c.business_name, SUM(o.subtotal) AS imponibile, COUNT(*) AS ordini FROM orders o
-         JOIN customers c ON c.id = o.customer_id WHERE o.status != 'annullato' AND date(o.created_at) >= ?
+      q(`SELECT c.id, c.business_name, SUM(o.subtotal) AS imponibile, COUNT(*) AS ordini ${J}
+         WHERE o.status != 'annullato' AND date(o.created_at) >= ? ${sc}
          GROUP BY c.id ORDER BY imponibile DESC LIMIT 8`, from30).all(),
       q(`SELECT c.id, c.business_name, c.phone, MAX(o.created_at) AS ultimo FROM customers c
          JOIN orders o ON o.customer_id = c.id AND o.status != 'annullato'
-         WHERE c.blocked = 0 GROUP BY c.id HAVING ultimo < datetime('now', '-21 days') ORDER BY ultimo LIMIT 8`).all(),
-      q(`SELECT id, name, pack, stock, unit FROM products WHERE archived = 0 AND stock IS NOT NULL AND stock <= 5 ORDER BY stock LIMIT 8`).all(),
-      q(`SELECT o.id, o.year, o.seq, o.status, o.total, o.delivery_date, o.created_at, c.business_name FROM orders o
-         JOIN customers c ON c.id = o.customer_id ORDER BY o.created_at DESC LIMIT 8`).all(),
+         WHERE c.blocked = 0 ${sc} GROUP BY c.id HAVING ultimo < datetime('now', '-21 days') ORDER BY ultimo LIMIT 8`).all(),
+      isAgent(user) ? { results: [] } : q(`SELECT id, name, pack, stock, unit FROM products WHERE archived = 0 AND stock IS NOT NULL AND stock <= 5 ORDER BY stock LIMIT 8`).all(),
+      q(`SELECT o.id, o.year, o.seq, o.status, o.total, o.delivery_date, o.created_at, c.business_name ${J}
+         WHERE 1 = 1 ${sc} ORDER BY o.created_at DESC LIMIT 8`).all(),
+      q(`SELECT pr.id, pr.title, pr.ends_on, pr.kind, pr.value, p.name, p.pack FROM promotions pr JOIN products p ON p.id = pr.product_id
+         WHERE pr.active = 1 AND pr.starts_on <= ?1 AND pr.ends_on >= ?1 ORDER BY pr.ends_on LIMIT 6`, today).all(),
     ]);
     const series = [];
     const map = new Map(byDay.results.map(r => [r.d, r]));
     for (let i = 0; i < 30; i++) { const d = addDays(from30, i); series.push({ d, imponibile: map.get(d)?.imponibile || 0, ordini: map.get(d)?.ordini || 0 }); }
     return json({
-      today, tomorrow, counts, month, prev_month: prevMonth, series,
+      today, tomorrow, counts, month, prev_month: prevMonth, series, role: user.role,
       top_products: topProducts.results, top_customers: topCustomers.results, dormant: dormant.results,
-      low_stock: lowStock.results, recent: recent.results.map(o => ({ ...o, number: orderNumber(o) })),
+      low_stock: lowStock.results, recent: recent.results.map(o => ({ ...o, number: orderNumber(o) })), promos: promos.results,
     });
   }],
 
   // ---------- ordini ----------
-  ['GET', '/api/admin/orders', async ({ env, url }) => {
+  ['GET', '/api/admin/orders', async ({ env, url, user }) => {
     const p = url.searchParams;
     const where = [], args = [];
     if (p.get('status')) {
@@ -114,6 +146,8 @@ export const adminRoutes = [
     if (p.get('from')) { where.push('date(o.created_at) >= ?'); args.push(p.get('from')); }
     if (p.get('to')) { where.push('date(o.created_at) <= ?'); args.push(p.get('to')); }
     if (p.get('zone_id')) { where.push('c.zone_id = ?'); args.push(int(p.get('zone_id'))); }
+    if (p.get('agent_id')) { where.push('o.agent_id = ?'); args.push(int(p.get('agent_id'))); }
+    if (isAgent(user)) { where.push('c.agent_id = ?'); args.push(user.id); }
     if (p.get('q')) {
       const qs = `%${p.get('q').trim()}%`;
       where.push("(c.business_name LIKE ? OR (o.year || '/' || substr('0000' || o.seq, -4)) LIKE ? OR o.notes LIKE ?)");
@@ -121,37 +155,46 @@ export const adminRoutes = [
     }
     const limit = Math.min(200, int(p.get('limit'), 50)), offset = int(p.get('offset'), 0);
     const sql = `SELECT o.id, o.year, o.seq, o.status, o.delivery_date, o.total, o.subtotal, o.created_at, o.source, o.paid, o.notes,
-      c.business_name, c.id AS customer_id, z.name AS zone_name,
+      c.business_name, c.id AS customer_id, z.name AS zone_name, a.name AS agent_name,
       (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id) AS lines
-      FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN zones z ON z.id = c.zone_id
+      FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN zones z ON z.id = c.zone_id LEFT JOIN users a ON a.id = c.agent_id
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY ${p.get('sort') === 'delivery' ? 'o.delivery_date, c.business_name' : 'o.created_at DESC'} LIMIT ? OFFSET ?`;
     const { results } = await env.DB.prepare(sql).bind(...args, limit + 1, offset).all();
     return json({ items: results.slice(0, limit).map(o => ({ ...o, number: orderNumber(o) })), more: results.length > limit });
   }],
 
-  ['GET', '/api/admin/orders/:id', async ({ env, params }) => {
-    const order = await getOrder(env, params.id);
-    if (!order) fail(404, 'Ordine non trovato.');
+  ['GET', '/api/admin/orders/:id', async ({ env, params, user }) => {
+    const order = await orderFor(env, user, params.id);
+    if (isAgent(user)) delete order.admin_notes;
     return json({ order });
   }],
 
   ['POST', '/api/admin/orders', async ({ env, request, user }) => {
     const b = await readJson(request);
-    const customer = await env.DB.prepare('SELECT * FROM customers WHERE id = ?').bind(int(b.customer_id)).first();
-    if (!customer) fail(400, 'Scegli il cliente.');
+    if (!b.customer_id) fail(400, 'Scegli il cliente.');
+    const customer = await customerFor(env, user, b.customer_id);
     const order = await createOrder(env, {
       customer, by: user, items: b.items, delivery_date: b.delivery_date || null, notes: str(b.notes, 1000),
-      source: ['telefono', 'whatsapp', 'email', 'agente', 'app'].includes(b.source) ? b.source : 'telefono', skipRules: true,
+      source: isAgent(user) ? 'agente' : ['telefono', 'whatsapp', 'email', 'agente', 'app'].includes(b.source) ? b.source : 'telefono', skipRules: true,
     });
-    if (b.status && STATUS.includes(b.status) && b.status !== 'nuovo') {
+    if (!isAgent(user) && b.status && STATUS.includes(b.status) && b.status !== 'nuovo') {
       await env.DB.batch([
         env.DB.prepare("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?").bind(b.status, order.id),
         env.DB.prepare("INSERT INTO order_events (order_id, type, status, user_id) VALUES (?, 'status', ?, ?)").bind(order.id, b.status, user.id),
       ]);
       order.status = b.status;
     }
-    const work = b.notify_customer ? notifyStatus(env, order) : null;
+    const settings = await getSettings(env);
+    const work = Promise.all([
+      b.notify_customer && order.status !== 'nuovo' ? notifyStatus(env, order) : null,
+      b.notify_customer && order.status === 'nuovo' ? notifyUsers(env, await customerUserIds(env, order.customer_id), {
+        title: 'Ordine registrato', body: `Abbiamo registrato l'ordine ${order.number} per ${fmtDateIt(order.delivery_date)}.`, url: `/#/ordini/${order.id}` }) : null,
+      // agente → avvisa il fornitore; fornitore → avvisa l'agente del cliente
+      isAgent(user) ? notifyNewOrder(env, request, order, settings, user)
+        : order.customer_agent_id ? notifyUsers(env, [order.customer_agent_id], {
+          title: `Ordine inserito per ${order.business_name}`, body: `${order.number} · ${euro(order.total)}`, url: `/admin/#/ordini/${order.id}` }) : null,
+    ]);
     return { response: json({ order }), waitUntil: work };
   }],
 
@@ -270,12 +313,10 @@ export const adminRoutes = [
 
   ['POST', '/api/admin/orders/:id/message', async ({ env, request, user, params }) => {
     const b = await readJson(request);
-    const order = await getOrder(env, params.id);
-    if (!order) fail(404, 'Ordine non trovato.');
+    const order = await orderFor(env, user, params.id);
     const text = str(b.text, 500);
     if (!text) fail(400, 'Scrivi il messaggio.');
     await env.DB.prepare("INSERT INTO order_events (order_id, type, note, user_id) VALUES (?, 'message', ?, ?)").bind(order.id, text, user.id).run();
-    const { customerUserIds } = await import('./core.js');
     const work = notifyUsers(env, await customerUserIds(env, order.customer_id), {
       title: `Messaggio sull'ordine ${order.number}`, body: text, url: `/#/ordini/${order.id}`,
     });
@@ -469,24 +510,24 @@ export const adminRoutes = [
   }],
 
   // ---------- clienti ----------
-  ['GET', '/api/admin/customers', async ({ env, url }) => {
+  ['GET', '/api/admin/customers', async ({ env, url, user }) => {
     const q = url.searchParams.get('q');
+    const [sc] = scope(user);
     const { results } = await env.DB.prepare(`
-      SELECT c.*, z.name AS zone_name,
+      SELECT c.*, z.name AS zone_name, a.name AS agent_name,
         (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status != 'annullato') AS orders_count,
         (SELECT MAX(created_at) FROM orders o WHERE o.customer_id = c.id AND o.status != 'annullato') AS last_order,
         (SELECT COALESCE(SUM(subtotal),0) FROM orders o WHERE o.customer_id = c.id AND o.status != 'annullato' AND date(o.created_at) >= date('now','-365 days')) AS revenue_year,
         (SELECT COUNT(*) FROM users u WHERE u.customer_id = c.id AND u.password_hash IS NOT NULL) AS active_users,
         (SELECT COUNT(*) FROM users u WHERE u.customer_id = c.id) AS users_count
-      FROM customers c LEFT JOIN zones z ON z.id = c.zone_id
-      ${q ? 'WHERE c.business_name LIKE ?1 OR c.vat LIKE ?1 OR c.city LIKE ?1 OR c.email LIKE ?1' : ''}
+      FROM customers c LEFT JOIN zones z ON z.id = c.zone_id LEFT JOIN users a ON a.id = c.agent_id
+      WHERE 1 = 1 ${sc} ${q ? 'AND (c.business_name LIKE ?1 OR c.vat LIKE ?1 OR c.city LIKE ?1 OR c.email LIKE ?1)' : ''}
       ORDER BY c.business_name`).bind(...(q ? [`%${q}%`] : [])).all();
     return json({ items: results });
   }],
-  ['GET', '/api/admin/customers/:id', async ({ env, params }) => {
+  ['GET', '/api/admin/customers/:id', async ({ env, params, user }) => {
     const id = int(params.id);
-    const c = await env.DB.prepare('SELECT * FROM customers WHERE id = ?').bind(id).first();
-    if (!c) fail(404, 'Cliente non trovato.');
+    const c = await customerFor(env, user, id);
     const [{ results: users }, { results: prices }, stats] = await Promise.all([
       env.DB.prepare(`SELECT u.id, u.name, u.email, u.active, u.last_login, u.password_hash IS NOT NULL AS activated,
         (SELECT COUNT(*) FROM push_subscriptions s WHERE s.user_id = u.id) AS push_devices FROM users u WHERE u.customer_id = ?`).bind(id).all(),
@@ -497,9 +538,9 @@ export const adminRoutes = [
     ]);
     return json({ customer: c, users, prices, stats });
   }],
-  ['POST', '/api/admin/customers', async ({ env, request }) => {
+  ['POST', '/api/admin/customers', async ({ env, request, user }) => {
     const b = await readJson(request);
-    const f = customerFields(b);
+    const f = isAgent(user) ? agentCustomerFields(b, user) : customerFields(b);
     if (!f.business_name) fail(400, 'Inserisci la ragione sociale.');
     const loginEmail = b.create_login ? String(b.login_email || f.email || '').trim() : '';
     if (b.create_login) {
@@ -514,12 +555,17 @@ export const adminRoutes = [
       const email = loginEmail;
       const u = await env.DB.prepare("INSERT INTO users (email, name, role, customer_id) VALUES (?, ?, 'cliente', ?) RETURNING id, email, name")
         .bind(email, f.contact_name, r.id).first();
-      invite = await sendInvite(env, request, u, await getSettings(env));
+      invite = await sendInvite(env, request, { ...u, role: 'cliente' }, await getSettings(env));
     }
-    return json({ id: r.id, invite });
+    let work = null;
+    if (isAgent(user)) work = notifyUsers(env, await adminIds(env), {
+      title: `Nuovo cliente da ${user.name || 'un agente'}`, body: `${f.business_name}${f.city ? ' · ' + f.city : ''}: controlla sconto e condizioni.`, url: `/admin/#/clienti/${r.id}` });
+    return { response: json({ id: r.id, invite }), waitUntil: work };
   }],
-  ['PUT', '/api/admin/customers/:id', async ({ env, request, params }) => {
-    const f = customerFields(await readJson(request));
+  ['PUT', '/api/admin/customers/:id', async ({ env, request, params, user }) => {
+    const existing = await customerFor(env, user, params.id);
+    const b = await readJson(request);
+    const f = isAgent(user) ? agentCustomerFields(b, user, existing) : customerFields(b);
     if (!f.business_name) fail(400, 'Inserisci la ragione sociale.');
     await env.DB.prepare(`UPDATE customers SET ${upd(f)} WHERE id = ?`).bind(...Object.values(f), int(params.id)).run();
     return json({ ok: true });
@@ -530,18 +576,20 @@ export const adminRoutes = [
     await env.DB.prepare('DELETE FROM customers WHERE id = ?').bind(int(params.id)).run();
     return json({ ok: true });
   }],
-  ['POST', '/api/admin/customers/:id/users', async ({ env, request, params }) => {
+  ['POST', '/api/admin/customers/:id/users', async ({ env, request, params, user }) => {
+    await customerFor(env, user, params.id);
     const b = await readJson(request);
     if (!isEmail(b.email)) fail(400, 'Inserisci un indirizzo email valido.');
     const exists = await env.DB.prepare('SELECT 1 FROM users WHERE email = ?').bind(b.email.trim()).first();
     if (exists) fail(409, 'Esiste già un accesso con questa email.');
     const u = await env.DB.prepare("INSERT INTO users (email, name, role, customer_id) VALUES (?, ?, 'cliente', ?) RETURNING id, email, name")
       .bind(b.email.trim(), str(b.name, 100), int(params.id)).first();
-    return json({ invite: await sendInvite(env, request, u, await getSettings(env)) });
+    return json({ invite: await sendInvite(env, request, { ...u, role: 'cliente' }, await getSettings(env)) });
   }],
-  ['POST', '/api/admin/users/:id/invite', async ({ env, request, params }) => {
-    const u = await env.DB.prepare('SELECT id, email, name FROM users WHERE id = ?').bind(int(params.id)).first();
-    if (!u) fail(404, 'Utente non trovato.');
+  ['POST', '/api/admin/users/:id/invite', async ({ env, request, params, user }) => {
+    const u = await env.DB.prepare(`SELECT u.id, u.email, u.name, u.role, c.agent_id FROM users u
+      LEFT JOIN customers c ON c.id = u.customer_id WHERE u.id = ? AND u.role != 'admin'`).bind(int(params.id)).first();
+    if (!u || (isAgent(user) && (u.role !== 'cliente' || u.agent_id !== user.id))) fail(404, 'Utente non trovato.');
     return json({ invite: await sendInvite(env, request, u, await getSettings(env)) });
   }],
   ['PATCH', '/api/admin/users/:id', async ({ env, request, params, user }) => {
@@ -566,12 +614,12 @@ export const adminRoutes = [
     ]);
     return json({ ok: true, count: entries.length });
   }],
-  ['GET', '/api/admin/customers/:id/catalog', async ({ env, params }) => {
-    const c = await env.DB.prepare('SELECT * FROM customers WHERE id = ?').bind(int(params.id)).first();
-    if (!c) fail(404, 'Cliente non trovato.');
+  ['GET', '/api/admin/customers/:id/catalog', async ({ env, params, user }) => {
+    const c = await customerFor(env, user, params.id);
     const settings = await getSettings(env);
     const zone = await zoneFor(env, c);
-    const items = (await adminCatalogFor(env, c)).map(p => ({ id: p.id, name: p.name, pack: p.pack, unit: p.unit, sku: p.sku, price: p.price, vat_rate: p.vat_rate, available: p.available, stock: p.stock }));
+    const items = (await adminCatalogFor(env, c)).map(p => ({ id: p.id, name: p.name, pack: p.pack, unit: p.unit, sku: p.sku, price: p.price,
+      regular_price: p.regular_price, promo: p.promo, vat_rate: p.vat_rate, available: p.available, stock: p.stock }));
     return json({ items, delivery_dates: deliveryOptions(zone, settings, 10) });
   }],
 
@@ -587,29 +635,149 @@ export const adminRoutes = [
     return json({ ok: true });
   }],
 
-  // ---------- comunicazioni ----------
-  ['GET', '/api/admin/announcements', async ({ env }) => {
-    const { results } = await env.DB.prepare('SELECT * FROM announcements ORDER BY id DESC LIMIT 50').all();
+  // ---------- comunicazioni (mirate) ----------
+  ['GET', '/api/admin/announcements', async ({ env, user }) => {
+    const { results } = await env.DB.prepare(`SELECT an.*, z.name AS zone_name, ag.name AS agent_name, c.business_name AS customer_name, cb.name AS author
+      FROM announcements an LEFT JOIN zones z ON z.id = an.zone_id LEFT JOIN users ag ON ag.id = an.agent_id
+      LEFT JOIN customers c ON c.id = an.customer_id LEFT JOIN users cb ON cb.id = an.created_by
+      ${isAgent(user) ? 'WHERE an.created_by = ?' : ''} ORDER BY an.id DESC LIMIT 60`).bind(...(isAgent(user) ? [user.id] : [])).all();
     return json({ items: results });
   }],
-  ['POST', '/api/admin/announcements', async ({ env, request }) => {
+  ['POST', '/api/admin/announcements', async ({ env, request, user }) => {
     const b = await readJson(request);
     const title = str(b.title, 120);
     if (!title) fail(400, 'Inserisci un titolo.');
-    const r = await env.DB.prepare('INSERT INTO announcements (title, body, kind, starts_on, ends_on, pushed) VALUES (?, ?, ?, ?, ?, ?) RETURNING id')
-      .bind(title, str(b.body, 1000), ['info', 'promo', 'avviso'].includes(b.kind) ? b.kind : 'info',
-        isIsoDate(b.starts_on) ? b.starts_on : null, isIsoDate(b.ends_on) ? b.ends_on : null, b.push ? 1 : 0).first();
-    let work = null;
-    if (b.push) {
-      const { results } = await env.DB.prepare(`SELECT u.id FROM users u JOIN customers c ON c.id = u.customer_id
-        WHERE u.role = 'cliente' AND u.active = 1 AND c.blocked = 0`).all();
-      work = notifyUsers(env, results.map(r => r.id), { title, body: str(b.body, 300) || '', url: '/' });
+    let target = ['tutti', 'zona', 'agente', 'cliente'].includes(b.target) ? b.target : 'tutti';
+    let zoneId = null, agentId = null, customerId = null;
+    if (isAgent(user)) {
+      // l'agente scrive solo ai suoi clienti (tutti o uno)
+      if (target === 'cliente') customerId = (await customerFor(env, user, b.customer_id)).id;
+      else { target = 'agente'; agentId = user.id; }
+    } else {
+      if (target === 'zona') { zoneId = int(b.zone_id); if (!zoneId) fail(400, 'Scegli la zona.'); }
+      if (target === 'agente') { agentId = int(b.agent_id); if (!agentId) fail(400, 'Scegli l\'agente.'); }
+      if (target === 'cliente') customerId = (await customerFor(env, user, b.customer_id)).id;
     }
-    return { response: json({ id: r.id }), waitUntil: work };
+    const where = { tutti: '1 = 1', zona: 'c.zone_id = ?', agente: 'c.agent_id = ?', cliente: 'c.id = ?' }[target];
+    const arg = { tutti: [], zona: [zoneId], agente: [agentId], cliente: [customerId] }[target];
+    const { results: recipients } = await env.DB.prepare(`SELECT u.id FROM users u JOIN customers c ON c.id = u.customer_id
+      WHERE u.role = 'cliente' AND u.active = 1 AND c.blocked = 0 AND ${where}`).bind(...arg).all();
+    const r = await env.DB.prepare(`INSERT INTO announcements (title, body, kind, starts_on, ends_on, target, zone_id, agent_id, customer_id, created_by, pushed, push_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`)
+      .bind(title, str(b.body, 1000), ['info', 'promo', 'avviso'].includes(b.kind) ? b.kind : 'info',
+        isIsoDate(b.starts_on) ? b.starts_on : null, isIsoDate(b.ends_on) ? b.ends_on : null,
+        target, zoneId, agentId, customerId, user.id, b.push ? 1 : 0, b.push ? recipients.length : 0).first();
+    const work = b.push ? notifyUsers(env, recipients.map(x => x.id), { title, body: str(b.body, 300) || '', url: '/' }) : null;
+    return { response: json({ id: r.id, recipients: recipients.length }), waitUntil: work };
   }],
-  ['DELETE', '/api/admin/announcements/:id', async ({ env, params }) => {
-    await env.DB.prepare('DELETE FROM announcements WHERE id = ?').bind(int(params.id)).run();
+  ['DELETE', '/api/admin/announcements/:id', async ({ env, params, user }) => {
+    await env.DB.prepare(`DELETE FROM announcements WHERE id = ? ${isAgent(user) ? 'AND created_by = ' + Number(user.id) : ''}`).bind(int(params.id)).run();
     return json({ ok: true });
+  }],
+
+  // ---------- promozioni ----------
+  ['GET', '/api/admin/promotions', async ({ env }) => {
+    const today = nowRome().date;
+    const { results } = await env.DB.prepare(`SELECT pr.*, p.name AS product_name, p.pack, p.unit, p.price AS list_price, z.name AS zone_name,
+        (SELECT COUNT(*) FROM order_items i WHERE i.promo_id = pr.id) AS orders_lines,
+        (SELECT COALESCE(SUM(i.qty), 0) FROM order_items i JOIN orders o ON o.id = i.order_id WHERE i.promo_id = pr.id AND o.status != 'annullato') AS qty_sold
+      FROM promotions pr JOIN products p ON p.id = pr.product_id LEFT JOIN zones z ON z.id = pr.zone_id
+      ORDER BY (pr.ends_on < ?) , pr.starts_on DESC LIMIT 200`).bind(today).all();
+    return json({ items: results.map(pr => ({ ...pr, promo_price: promoPrice(pr, pr.list_price) })), today });
+  }],
+  ['POST', '/api/admin/promotions', async ({ env, request, user }) => {
+    onlyAdmin(user);
+    return savePromo(env, await readJson(request));
+  }],
+  ['PUT', '/api/admin/promotions/:id', async ({ env, request, params, user }) => {
+    onlyAdmin(user);
+    return savePromo(env, await readJson(request), int(params.id));
+  }],
+  ['PATCH', '/api/admin/promotions/:id', async ({ env, request, params, user }) => {
+    onlyAdmin(user);
+    const b = await readJson(request);
+    await env.DB.prepare('UPDATE promotions SET active = ? WHERE id = ?').bind(b.active ? 1 : 0, int(params.id)).run();
+    return json({ ok: true });
+  }],
+  ['DELETE', '/api/admin/promotions/:id', async ({ env, params, user }) => {
+    onlyAdmin(user);
+    await env.DB.prepare('DELETE FROM promotions WHERE id = ?').bind(int(params.id)).run();
+    return json({ ok: true });
+  }],
+
+  // ---------- agenti ----------
+  ['GET', '/api/admin/agents', async ({ env, user }) => {
+    const monthStart = nowRome().date.slice(0, 8) + '01';
+    const { results } = await env.DB.prepare(`SELECT u.id, u.name, u.email, u.phone, u.commission, u.active, u.last_login,
+        u.password_hash IS NOT NULL AS activated,
+        (SELECT COUNT(*) FROM customers c WHERE c.agent_id = u.id) AS customers,
+        (SELECT COUNT(*) FROM push_subscriptions s WHERE s.user_id = u.id) AS push_devices,
+        (SELECT COALESCE(SUM(o.subtotal), 0) FROM orders o WHERE o.agent_id = u.id AND o.status != 'annullato' AND date(o.created_at) >= ?1) AS month_revenue,
+        (SELECT COALESCE(SUM(ROUND(o.subtotal * o.commission_rate / 100)), 0) FROM orders o WHERE o.agent_id = u.id AND o.status != 'annullato' AND date(o.created_at) >= ?1) AS month_commission
+      FROM users u WHERE u.role = 'agente' ${isAgent(user) ? 'AND u.id = ' + Number(user.id) : ''} ORDER BY u.active DESC, u.name`).bind(monthStart).all();
+    return json({ items: results });
+  }],
+  ['POST', '/api/admin/agents', async ({ env, request, user }) => {
+    onlyAdmin(user);
+    const b = await readJson(request);
+    if (!str(b.name)) fail(400, 'Inserisci il nome dell\'agente.');
+    if (!isEmail(b.email)) fail(400, 'Inserisci un indirizzo email valido.');
+    const exists = await env.DB.prepare('SELECT 1 FROM users WHERE email = ?').bind(b.email.trim()).first();
+    if (exists) fail(409, 'Esiste già un accesso con questa email.');
+    const u = await env.DB.prepare("INSERT INTO users (email, name, phone, commission, role) VALUES (?, ?, ?, ?, 'agente') RETURNING id, email, name, phone, role")
+      .bind(b.email.trim(), str(b.name, 100), str(b.phone, 40), Math.min(100, Math.max(0, num(b.commission)))).first();
+    const ids = (b.customer_ids || []).map(Number).filter(Boolean);
+    if (ids.length) await env.DB.batch(ids.map(id => env.DB.prepare('UPDATE customers SET agent_id = ? WHERE id = ?').bind(u.id, id)));
+    return json({ id: u.id, invite: await sendInvite(env, request, u, await getSettings(env)) });
+  }],
+  ['PUT', '/api/admin/agents/:id', async ({ env, request, params, user }) => {
+    onlyAdmin(user);
+    const b = await readJson(request);
+    const id = int(params.id);
+    if (!str(b.name)) fail(400, 'Inserisci il nome dell\'agente.');
+    await env.DB.prepare("UPDATE users SET name = ?, phone = ?, commission = ?, active = ? WHERE id = ? AND role = 'agente'")
+      .bind(str(b.name, 100), str(b.phone, 40), Math.min(100, Math.max(0, num(b.commission))), b.active ? 1 : 0, id).run();
+    if (!b.active) await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id).run();
+    if (Array.isArray(b.customer_ids)) {
+      const ids = b.customer_ids.map(Number).filter(Boolean);
+      await env.DB.batch([
+        env.DB.prepare('UPDATE customers SET agent_id = NULL WHERE agent_id = ?').bind(id),
+        ...ids.map(cid => env.DB.prepare('UPDATE customers SET agent_id = ? WHERE id = ?').bind(id, cid)),
+      ]);
+    }
+    return json({ ok: true });
+  }],
+  ['DELETE', '/api/admin/agents/:id', async ({ env, params, user }) => {
+    onlyAdmin(user);
+    const id = int(params.id);
+    const used = await env.DB.prepare('SELECT 1 FROM orders WHERE agent_id = ? LIMIT 1').bind(id).first();
+    if (used) fail(409, 'L\'agente ha ordini con provvigioni: disattivalo invece di eliminarlo.');
+    await env.DB.batch([
+      env.DB.prepare('UPDATE customers SET agent_id = NULL WHERE agent_id = ?').bind(id),
+      env.DB.prepare("DELETE FROM users WHERE id = ? AND role = 'agente'").bind(id),
+    ]);
+    return json({ ok: true });
+  }],
+
+  // ---------- provvigioni ----------
+  ['GET', '/api/admin/commissions', async ({ env, url, user }) => {
+    const today = nowRome().date;
+    const from = isIsoDate(url.searchParams.get('from')) ? url.searchParams.get('from') : today.slice(0, 8) + '01';
+    const to = isIsoDate(url.searchParams.get('to')) ? url.searchParams.get('to') : today;
+    const onlyDelivered = url.searchParams.get('delivered') === '1';
+    const agentFilter = isAgent(user) ? user.id : int(url.searchParams.get('agent_id')) || null;
+    const { results } = await env.DB.prepare(`SELECT o.id, o.year, o.seq, o.status, o.created_at, o.delivery_date, o.subtotal, o.commission_rate,
+        ROUND(o.subtotal * o.commission_rate / 100) AS commission, o.paid, c.business_name, a.id AS agent_id, a.name AS agent_name
+      FROM orders o JOIN customers c ON c.id = o.customer_id JOIN users a ON a.id = o.agent_id
+      WHERE o.status != 'annullato' ${onlyDelivered ? "AND o.status = 'consegnato'" : ''} AND date(o.created_at) BETWEEN ? AND ?
+        ${agentFilter ? 'AND o.agent_id = ?' : ''}
+      ORDER BY a.name, o.created_at`).bind(from, to, ...(agentFilter ? [agentFilter] : [])).all();
+    const byAgent = {};
+    for (const o of results) {
+      const a = byAgent[o.agent_id] ||= { agent_id: o.agent_id, agent_name: o.agent_name, orders: 0, imponibile: 0, provvigione: 0 };
+      a.orders++; a.imponibile += o.subtotal; a.provvigione += o.commission;
+    }
+    return json({ from, to, agents: Object.values(byAgent), orders: results.map(o => ({ ...o, number: orderNumber(o) })) });
   }],
 
   // ---------- impostazioni & staff ----------
@@ -629,6 +797,35 @@ export const adminRoutes = [
   }],
 ];
 
+async function savePromo(env, b, id) {
+  const pid = int(b.product_id);
+  const p = await env.DB.prepare('SELECT id, name, price FROM products WHERE id = ?').bind(pid).first();
+  if (!p) fail(400, 'Scegli il prodotto in promozione.');
+  const kind = b.kind === 'prezzo' ? 'prezzo' : 'sconto';
+  const value = kind === 'prezzo' ? int(b.value) : num(b.value);
+  if (kind === 'sconto' && !(value > 0 && value < 100)) fail(400, 'Lo sconto deve essere tra 1 e 99%.');
+  if (kind === 'prezzo' && !(value > 0 && value < p.price)) fail(400, 'Il prezzo in promozione deve essere più basso del listino.');
+  if (!isIsoDate(b.starts_on) || !isIsoDate(b.ends_on) || b.ends_on < b.starts_on) fail(400, 'Controlla le date della promozione.');
+  const vals = [pid, str(b.title, 120), str(b.description, 500), kind, value, b.starts_on, b.ends_on, b.zone_id ? int(b.zone_id) : null, b.active === false ? 0 : 1];
+  let promoId = id;
+  if (id) await env.DB.prepare('UPDATE promotions SET product_id = ?, title = ?, description = ?, kind = ?, value = ?, starts_on = ?, ends_on = ?, zone_id = ?, active = ? WHERE id = ?').bind(...vals, id).run();
+  else promoId = (await env.DB.prepare('INSERT INTO promotions (product_id, title, description, kind, value, starts_on, ends_on, zone_id, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id').bind(...vals).first()).id;
+  let work = null, recipients = 0;
+  if (b.push) {
+    const { results } = await env.DB.prepare(`SELECT u.id FROM users u JOIN customers c ON c.id = u.customer_id
+      WHERE u.role = 'cliente' AND u.active = 1 AND c.blocked = 0 ${b.zone_id ? 'AND c.zone_id = ?' : ''}`).bind(...(b.zone_id ? [int(b.zone_id)] : [])).all();
+    recipients = results.length;
+    const price = kind === 'prezzo' ? euro(value) : `-${value}%`;
+    await env.DB.prepare('UPDATE promotions SET pushed = 1 WHERE id = ?').bind(promoId).run();
+    work = notifyUsers(env, results.map(r => r.id), {
+      title: str(b.title, 120) || `In offerta: ${p.name}`,
+      body: `${p.name} a ${price} fino al ${fmtDateIt(b.ends_on)}.${b.description ? ' ' + str(b.description, 200) : ''}`,
+      url: '/#/?offerte', tag: `promo-${promoId}`,
+    });
+  }
+  return { response: json({ id: promoId, recipients }), waitUntil: work };
+}
+
 async function saveZone(env, b, id) {
   const name = str(b.name, 80);
   if (!name) fail(400, 'Inserisci il nome della zona.');
@@ -640,3 +837,12 @@ async function saveZone(env, b, id) {
   else await env.DB.prepare('INSERT INTO zones (name, delivery_days, cutoff_time, lead_days, delivery_fee, free_over, sort) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(...vals).run();
   return json({ ok: true });
 }
+
+// Rotte del pannello consentite anche agli agenti (con i filtri sopra: vedono solo i propri clienti).
+export const AGENT_ROUTES = new Set([
+  'GET /api/admin/dashboard', 'GET /api/admin/orders', 'GET /api/admin/orders/:id', 'POST /api/admin/orders',
+  'POST /api/admin/orders/:id/message', 'GET /api/admin/customers', 'GET /api/admin/customers/:id', 'POST /api/admin/customers',
+  'PUT /api/admin/customers/:id', 'POST /api/admin/customers/:id/users', 'POST /api/admin/users/:id/invite',
+  'GET /api/admin/customers/:id/catalog', 'GET /api/admin/zones', 'GET /api/admin/announcements', 'POST /api/admin/announcements',
+  'DELETE /api/admin/announcements/:id', 'GET /api/admin/promotions', 'GET /api/admin/agents', 'GET /api/admin/commissions',
+]);

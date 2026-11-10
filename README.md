@@ -4,7 +4,13 @@ App per i clienti (bar, ristoranti, pasticcerie) + pannello del fornitore.
 Tutto su Cloudflare: Pages (sito + API), D1 (database), R2 (foto prodotti). Nessuna libreria esterna, niente build.
 
 - **Clienti** → `https://ordini.officinedeicedri.it/`
-- **Fornitore** → `https://ordini.officinedeicedri.it/admin/`
+- **Agente** (stesso pannello, vede solo i suoi clienti)
+- Panoramica con ordini, imponibile e provvigioni del mese, clienti da risentire, offerte in corso
+- Ordini dei suoi clienti (sola lettura sullo stato), inserimento ordini per loro, messaggi ai clienti
+- Nuovi clienti acquisiti: il fornitore riceve un avviso e decide sconto e condizioni
+- Le sue provvigioni per periodo, notifiche push quando un suo cliente ordina
+
+**Fornitore** → `https://ordini.officinedeicedri.it/admin/`
 
 ## Il dominio: il sito WordPress resta com'è
 
@@ -76,6 +82,12 @@ npm run dev                      # il database locale si crea da solo           
 - Storico ordini, stato in tempo reale, "Ordina di nuovo", annullamento finché non è confermato
 - Notifiche push (conferma, preparazione, consegna, modifiche, messaggi, promozioni)
 
+**Agente** (stesso pannello, vede solo i suoi clienti)
+- Panoramica con ordini, imponibile e provvigioni del mese, clienti da risentire, offerte in corso
+- Ordini dei suoi clienti (sola lettura sullo stato), inserimento ordini per loro, messaggi ai clienti
+- Nuovi clienti acquisiti: il fornitore riceve un avviso e decide sconto e condizioni
+- Le sue provvigioni per periodo, notifiche push quando un suo cliente ordina
+
 **Fornitore**
 - Panoramica: da confermare, consegne oggi/domani, imponibile del mese, grafico 30 giorni, prodotti e clienti top, clienti da richiamare, scorte basse
 - Ordini: filtri, ricerca, cambio stato singolo o in blocco, modifica righe (peso reale, sostituzioni, prezzi), cambio data, note interne, pagato, rif. fattura/DDT, messaggio al cliente, stampa, WhatsApp
@@ -84,7 +96,10 @@ npm run dev                      # il database locale si crea da solo           
 - Prodotti: foto (R2 o URL), giacenze, minimi e multipli (es. kg a 0,5), in evidenza, prodotti riservati a certi clienti, import/export listino CSV
 - Clienti: anagrafica e fatturazione (SDI/PEC), zona, sconto, listino personalizzato, pagamento, blocco con messaggio, più accessi per locale, invito via email o WhatsApp
 - Zone: giorni del giro, anticipo, orario limite, costo e soglia consegna gratuita
-- Comunicazioni con push a tutti i clienti
+- Agenti: accesso proprio, clienti assegnati, provvigione %, notifica a fornitore e agente a ogni ordine dei suoi clienti
+- Provvigioni: report per periodo e per agente (fissate sull'ordine al momento dell'ordine), export CSV
+- Promozioni: sconto % o prezzo speciale su un prodotto, con date, per tutti o per zona; badge "Offerta" nel catalogo, push ai clienti, quantità vendute in promo
+- Comunicazioni mirate: a tutti, a una zona, ai clienti di un agente o a un singolo cliente, con push
 - Impostazioni: sospensione ordini (ferie), giorni di chiusura, ordine minimo, conferma automatica, promemoria
 - Esportazione ordini CSV per il commercialista
 

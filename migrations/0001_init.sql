@@ -34,6 +34,7 @@ CREATE TABLE customers (
   delivery_address TEXT,
   delivery_notes TEXT,
   zone_id INTEGER REFERENCES zones(id) ON DELETE SET NULL,
+  agent_id INTEGER REFERENCES users(id) ON DELETE SET NULL,  -- agente di riferimento
   discount REAL NOT NULL DEFAULT 0,               -- sconto % su listino base
   payment_terms TEXT,
   min_order INTEGER,                              -- null = usa impostazione generale
@@ -48,13 +49,16 @@ CREATE TABLE users (
   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
   name TEXT,
   password_hash TEXT,
-  role TEXT NOT NULL CHECK (role IN ('admin','cliente')),
+  role TEXT NOT NULL CHECK (role IN ('admin','cliente','agente')),
+  phone TEXT,
+  commission REAL NOT NULL DEFAULT 0,             -- provvigione % (solo agenti)
   customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
   active INTEGER NOT NULL DEFAULT 1,
   last_login TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_users_customer ON users(customer_id);
+CREATE INDEX idx_customers_agent ON customers(agent_id);
 
 CREATE TABLE sessions (
   token_hash TEXT PRIMARY KEY,
@@ -134,6 +138,8 @@ CREATE TABLE orders (
   seq INTEGER NOT NULL,
   customer_id INTEGER NOT NULL REFERENCES customers(id),
   user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  agent_id INTEGER REFERENCES users(id) ON DELETE SET NULL,  -- agente del cliente al momento dell'ordine
+  commission_rate REAL NOT NULL DEFAULT 0,
   source TEXT NOT NULL DEFAULT 'app',             -- app | telefono | whatsapp | email | agente
   status TEXT NOT NULL DEFAULT 'nuovo',           -- nuovo, confermato, in_preparazione, in_consegna, consegnato, annullato
   delivery_date TEXT,
@@ -152,6 +158,7 @@ CREATE TABLE orders (
 CREATE INDEX idx_orders_customer ON orders(customer_id, created_at);
 CREATE INDEX idx_orders_status ON orders(status);
 CREATE INDEX idx_orders_delivery ON orders(delivery_date);
+CREATE INDEX idx_orders_agent ON orders(agent_id, created_at);
 
 CREATE TABLE order_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -164,7 +171,9 @@ CREATE TABLE order_items (
   qty REAL NOT NULL,
   price INTEGER NOT NULL,
   vat_rate REAL NOT NULL,
-  line_total INTEGER NOT NULL
+  line_total INTEGER NOT NULL,
+  list_price INTEGER,                             -- prezzo che avrebbe pagato senza promozione
+  promo_id INTEGER
 );
 CREATE INDEX idx_items_order ON order_items(order_id);
 
@@ -207,9 +216,32 @@ CREATE TABLE announcements (
   kind TEXT NOT NULL DEFAULT 'info',              -- info | promo | avviso
   starts_on TEXT,
   ends_on TEXT,
+  target TEXT NOT NULL DEFAULT 'tutti',           -- tutti | zona | agente | cliente
+  zone_id INTEGER REFERENCES zones(id) ON DELETE CASCADE,
+  agent_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  pushed INTEGER NOT NULL DEFAULT 0,
+  push_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- promozioni: prezzo speciale o sconto % su un prodotto, per un periodo, per tutti o per una zona
+CREATE TABLE promotions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  title TEXT,
+  description TEXT,
+  kind TEXT NOT NULL DEFAULT 'sconto',            -- sconto (%) | prezzo (centesimi IVA escl.)
+  value REAL NOT NULL,
+  starts_on TEXT NOT NULL,
+  ends_on TEXT NOT NULL,
+  zone_id INTEGER REFERENCES zones(id) ON DELETE CASCADE,
+  active INTEGER NOT NULL DEFAULT 1,
   pushed INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX idx_promotions_product ON promotions(product_id, starts_on, ends_on);
 
 CREATE TABLE reminder_log (
   customer_id INTEGER NOT NULL,

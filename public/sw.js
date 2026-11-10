@@ -1,5 +1,5 @@
 // Service worker: notifiche push + cache leggera dell'interfaccia.
-const CACHE = 'odc-v1';
+const CACHE = 'odc-v2';
 const SHELL = ['/', '/index.html', '/assets/app.css', '/assets/common.js', '/assets/shop.js', '/admin/', '/admin/index.html', '/assets/admin.js', '/icons/icon-192.png'];
 
 self.addEventListener('install', e => {

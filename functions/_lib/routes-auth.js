@@ -60,7 +60,7 @@ export const authRoutes = [
     const recent = await env.DB.prepare(
       "SELECT COUNT(*) AS n FROM login_attempts WHERE (email = ? OR ip = ?) AND created_at > datetime('now', '-15 minutes')").bind(email, ip).first();
     if (recent.n >= 8) fail(429, 'Troppi tentativi. Riprova tra 15 minuti.');
-    const user = await env.DB.prepare("SELECT * FROM users WHERE email = ? AND role = 'cliente'").bind(email).first();
+    const user = await env.DB.prepare("SELECT * FROM users WHERE email = ? AND role IN ('cliente', 'agente')").bind(email).first();
     if (!user || !user.active || !(await verifyPassword(String(b.password || ''), user.password_hash))) {
       await env.DB.prepare('INSERT INTO login_attempts (email, ip) VALUES (?, ?)').bind(email, ip).run();
       fail(401, 'Email o password non corretti.');
@@ -93,7 +93,7 @@ export const authRoutes = [
     const b = await readJson(request);
     if (!b.password || b.password.length < MIN_PW) fail(400, `La password deve avere almeno ${MIN_PW} caratteri.`);
     const hash = await sha256(String(b.token || ''));
-    const row = await env.DB.prepare("SELECT t.* FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.expires_at > ? AND u.role = 'cliente'").bind(hash, new Date().toISOString()).first();
+    const row = await env.DB.prepare("SELECT t.* FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.expires_at > ? AND u.role IN ('cliente', 'agente')").bind(hash, new Date().toISOString()).first();
     if (!row) fail(400, 'Il link è scaduto o è già stato usato.');
     await env.DB.batch([
       env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(await hashPassword(b.password), row.user_id),
@@ -107,7 +107,7 @@ export const authRoutes = [
 
   ['POST', '/api/auth/forgot', async ({ env, request }) => {
     const b = await readJson(request);
-    const user = await env.DB.prepare("SELECT * FROM users WHERE email = ? AND active = 1 AND role = 'cliente'").bind(String(b.email || '').trim()).first();
+    const user = await env.DB.prepare("SELECT * FROM users WHERE email = ? AND active = 1 AND role IN ('cliente', 'agente')").bind(String(b.email || '').trim()).first();
     if (user) {
       const s = await getSettings(env);
       const token = await createUserToken(env, user.id, 'reset', 1);
