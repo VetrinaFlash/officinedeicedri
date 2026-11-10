@@ -7,7 +7,7 @@ compatibility_date = "2025-09-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "odc-gestionale"
-database_id = "INSERISCI_ID_DATABASE"
+database_id = "d791251d-2bed-4ad6-a089-3e9171a6c27c"
 
 # Foto prodotti: crea il bucket R2 "odc-gestionale-images".
 [[r2_buckets]]
