@@ -105,6 +105,9 @@ npm run dev                      # il database locale si crea da solo           
 
 ## Note tecniche
 
+- Struttura: la logica API sta in `src/` (`src/api.js` + `src/lib/`). Su Pages la espone `functions/api/[[path]].js`;
+  `src/index.js` è l'ingresso pronto nel caso si voglia pubblicare come Worker.
+
 - Importi in centesimi, IVA esclusa sul listino; IVA calcolata per aliquota.
 - Pannello protetto da `ADMIN_PASSWORD` (confronto a tempo costante, blocco dopo 8 errori in 15 minuti). Password clienti PBKDF2, sessione in cookie HttpOnly, blocco dopo 8 tentativi falliti in 15 minuti, controllo dell'origine sulle richieste che modificano dati.
 - Web Push implementato con WebCrypto (VAPID + aes128gcm), nessuna dipendenza. Su iPhone le notifiche funzionano con l'app aggiunta alla Home (iOS 16.4+): l'app lo spiega al cliente.

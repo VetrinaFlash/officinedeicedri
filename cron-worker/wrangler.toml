@@ -1,0 +1,10 @@
+name = "odc-gestionale-cron"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+
+[triggers]
+crons = ["*/30 * * * *"]
+
+[vars]
+APP_URL = "https://ordini.officinedeicedri.it"
+# CRON_SECRET va impostato come secret: npx wrangler secret put CRON_SECRET

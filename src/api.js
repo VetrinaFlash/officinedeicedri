@@ -58,7 +58,18 @@ const ROUTES = [
 
 /** Gestisce tutte le richieste /api/* (context: { request, env, waitUntil }). */
 export async function handleApi(context) {
-  const { request, env } = context;
+  const { request } = context;
+  // binding accettati anche in minuscolo (se configurati dal pannello Cloudflare)
+  const env = { ...context.env };
+  env.DB ||= context.env.db;
+  env.IMAGES ||= context.env.images || context.env.Images;
+  if (!env.DB) return json({ error: 'Database non collegato: aggiungi il binding D1 con nome DB.' }, 500);
+  const url0 = new URL(request.url);
+  // promemoria via HTTP (Pages non ha cron: lo chiama il piccolo worker in cron-worker/)
+  if (request.method === 'POST' && url0.pathname === '/api/cron/reminders') {
+    if (!env.CRON_SECRET || request.headers.get('x-cron-secret') !== env.CRON_SECRET) return json({ error: 'forbidden' }, 403);
+    return json({ sent: await runReminders(env) });
+  }
   const url = new URL(request.url);
 
   // immagini prodotto da R2
